@@ -93,9 +93,10 @@ struct CopyService: Sendable {
     }
 
     private nonisolated func relativePath(of url: URL, from base: URL) -> String? {
-        let urlPath = url.standardized.path
-        let basePath = base.standardized.path + "/"
-        guard urlPath.hasPrefix(basePath) else { return nil }
-        return String(urlPath.dropFirst(basePath.count))
+        let urlPath = url.resolvingSymlinksInPath().path
+        let basePath = base.resolvingSymlinksInPath().path
+        let baseWithSlash = basePath.hasSuffix("/") ? basePath : basePath + "/"
+        guard urlPath.hasPrefix(baseWithSlash) else { return nil }
+        return String(urlPath.dropFirst(baseWithSlash.count))
     }
 }
