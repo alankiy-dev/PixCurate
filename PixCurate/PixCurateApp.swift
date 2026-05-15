@@ -44,6 +44,11 @@ struct PixCurateCommands2: Commands {
         CommandGroup(replacing: .toolbar) { }
         CommandGroup(replacing: .sidebar) { }
 
+        // Windowメニューを日本語化
+        CommandGroup(replacing: .windowArrangement) {
+            Button("すべてを手前に移動") { NSApplication.shared.arrangeInFront(nil) }
+        }
+
         // ツールメニュー
         CommandMenu("ツール") {
             Button("再スキャン") {
