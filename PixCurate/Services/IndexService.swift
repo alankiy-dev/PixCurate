@@ -92,7 +92,9 @@ enum IndexService {
                 if let lp = file.locationPath {
                     file.locationId = locStore.match(path: lp)
                 }
-                DatabaseService.shared.upsert(file, xmpModifiedAt: xmpDates[path])
+                let xmpMod = xmpDates[path]
+                file.xmpModifiedAt = xmpMod
+                DatabaseService.shared.upsert(file, xmpModifiedAt: xmpMod)
                 scanned.append(file)
                 if isNew { added += 1 } else { updated += 1 }
             } else if let row = dbDict[path] {
@@ -169,7 +171,9 @@ enum IndexService {
             if let lp = file.locationPath {
                 file.locationId = locStore.match(path: lp)
             }
-            DatabaseService.shared.upsert(file, xmpModifiedAt: xmpDates[path])
+            let xmpMod = xmpDates[path]
+            file.xmpModifiedAt = xmpMod
+            DatabaseService.shared.upsert(file, xmpModifiedAt: xmpMod)
 
             if let idx = existing.firstIndex(where: { $0.rawURL == fileURL }) {
                 existing[idx] = file

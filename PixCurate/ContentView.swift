@@ -4,10 +4,12 @@ import Observation
 // MARK: - UserDefaults keys
 
 private enum Keys {
-    static let srcPath       = "pixcurate.srcPath"
-    static let dstPath       = "pixcurate.dstPath"
-    static let minRating     = "pixcurate.minRating"
-    static let keepStructure = "pixcurate.keepStructure"
+    static let srcPath          = "pixcurate.srcPath"
+    static let dstPath          = "pixcurate.dstPath"
+    static let minRating        = "pixcurate.minRating"
+    static let keepStructure    = "pixcurate.keepStructure"
+    static let useXmpSince      = "pixcurate.useXmpSince"
+    static let xmpSinceDate     = "pixcurate.xmpSinceDate"
 }
 
 // MARK: - ViewModel
@@ -90,6 +92,7 @@ class FileListViewModel {
     }
 
     var locationFilter: Set<UUID> = []
+    var xmpSinceFilter: Date? = nil   // nilなら無効
 
     func updateRating(for rawURL: URL, rating: Int?) {
         update(rawURL: rawURL) { $0.rating = rating }
@@ -127,7 +130,14 @@ class FileListViewModel {
                 group.isEmpty || group.contains { file.tags.contains($0) }
             }
             let locationOK = locationFilter.isEmpty || (file.locationId.map { locationFilter.contains($0) } ?? false)
-            return ratingOK && tagOK && locationOK
+            let xmpOK: Bool
+            if let since = xmpSinceFilter {
+                let sinceDay = Calendar.current.startOfDay(for: since)
+                xmpOK = file.xmpModifiedAt.map { Calendar.current.startOfDay(for: $0) >= sinceDay } ?? false
+            } else {
+                xmpOK = true
+            }
+            return ratingOK && tagOK && locationOK && xmpOK
         }
     }
 
@@ -183,6 +193,10 @@ struct ContentView: View {
     @State private var ratingFilterExpanded = true
     @State private var tagFilterExpanded = true
     @State private var locationFilterExpanded = true
+    @State private var xmpFilterExpanded = true
+    @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
+    @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
+        ?? Calendar.current.startOfDay(for: Date())
     @State private var presetExpanded = true
     @State private var activePresetId: UUID?
     @State private var showSavePreset = false
@@ -204,6 +218,9 @@ struct ContentView: View {
         .onChange(of: srcURL, initial: true) { _, newVal in
             BookmarkStore.save(url: newVal, key: Keys.srcPath)
             if let url = newVal {
+                vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
+                vm.locationFilter = selectedLocationIds
+                vm.filterGroups = filterGroups.map { Array($0.tagNames) }
                 vm.load(from: url, minRating: minRating)
             }
         }
@@ -262,6 +279,34 @@ struct ContentView: View {
                         } label: {
                             filterLabel("撮影地", icon: "mappin.and.ellipse", color: .red)
                         }
+                    }
+
+                    // XMP更新日
+                    DisclosureGroup(isExpanded: $xmpFilterExpanded) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("更新日フィルター", isOn: $useXmpSince)
+                                .font(.callout)
+                                .onChange(of: useXmpSince) { _, v in
+                                    UserDefaults.standard.set(v, forKey: Keys.useXmpSince)
+                                    applyXmpFilter()
+                                }
+                            if useXmpSince {
+                                DatePicker(
+                                    "以降",
+                                    selection: $xmpSinceDate,
+                                    displayedComponents: .date
+                                )
+                                .datePickerStyle(.compact)
+                                .font(.callout)
+                                .onChange(of: xmpSinceDate) { _, v in
+                                    UserDefaults.standard.set(v, forKey: Keys.xmpSinceDate)
+                                    applyXmpFilter()
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    } label: {
+                        filterLabel("更新日", icon: "calendar.badge.clock", color: .orange)
                     }
                 } header: {
                     sectionHeader("フィルター")
@@ -407,6 +452,12 @@ struct ContentView: View {
 
     private func applyLocationFilter(clearPreset: Bool = true) {
         vm.locationFilter = selectedLocationIds
+        vm.applyFilter(minRating: minRating)
+        if clearPreset { activePresetId = nil }
+    }
+
+    private func applyXmpFilter(clearPreset: Bool = true) {
+        vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
         vm.applyFilter(minRating: minRating)
         if clearPreset { activePresetId = nil }
     }

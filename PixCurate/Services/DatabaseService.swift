@@ -241,10 +241,11 @@ struct DBFileRow: Sendable {
 
     nonisolated func toPhotoFile() -> PhotoFile {
         var f = PhotoFile(rawURL: URL(fileURLWithPath: path))
-        f.rating      = rating
-        f.shotDate    = shotDate
-        f.tags        = tags
-        f.locationId  = locationId
+        f.rating         = rating
+        f.shotDate       = shotDate
+        f.tags           = tags
+        f.locationId     = locationId
+        f.xmpModifiedAt  = xmpModifiedAt
         return f
     }
 }

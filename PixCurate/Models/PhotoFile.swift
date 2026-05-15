@@ -8,6 +8,7 @@ struct PhotoFile: Identifiable, Sendable {
     var tags: [String] = []
     var locationPath: LocationPath? = nil
     var locationId: UUID? = nil
+    var xmpModifiedAt: Date? = nil
 
     nonisolated init(rawURL: URL) {
         self.id = UUID()
