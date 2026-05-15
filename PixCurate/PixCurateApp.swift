@@ -1,8 +1,10 @@
 import SwiftUI
 
 extension Notification.Name {
-    static let rescanRequested  = Notification.Name("pixcurate.rescan")
-    static let rebuildRequested = Notification.Name("pixcurate.rebuild")
+    static let rescanRequested    = Notification.Name("pixcurate.rescan")
+    static let rebuildRequested   = Notification.Name("pixcurate.rebuild")
+    static let resetWindowState   = Notification.Name("pixcurate.resetWindowState")
+    static let showHelp           = Notification.Name("pixcurate.showHelp")
 }
 
 // MARK: - App Commands
@@ -34,7 +36,12 @@ struct PixCurateCommands: Commands {
         CommandGroup(replacing: .undoRedo) { }
         CommandGroup(replacing: .pasteboard) { }
         CommandGroup(replacing: .textEditing) { }
-        CommandGroup(replacing: .help) { }
+        CommandGroup(replacing: .help) {
+            Button("PixCurate ヘルプ") {
+                NotificationCenter.default.post(name: .showHelp, object: nil)
+            }
+            .keyboardShortcut("/", modifiers: .command)
+        }
     }
 }
 
@@ -58,6 +65,14 @@ struct PixCurateCommands2: Commands {
                 NotificationCenter.default.post(name: .rebuildRequested, object: nil)
             }
         }
+
+        // ウィンドウメニューに追加
+        CommandGroup(after: .windowArrangement) {
+            Divider()
+            Button("画面状態の初期化") {
+                NotificationCenter.default.post(name: .resetWindowState, object: nil)
+            }
+        }
     }
 }
 
@@ -66,6 +81,7 @@ struct PixCurateCommands2: Commands {
 @main
 struct PixCurateApp: App {
     @State private var showAbout = false
+    @State private var showHelp  = false
 
     var body: some Scene {
         WindowGroup {
@@ -74,7 +90,19 @@ struct PixCurateApp: App {
                 .environment(LocationStore.shared)
                 .environment(DisplaySettings.shared)
                 .environment(FilterPresetStore.shared)
+                .environment(CollectionStore.shared)
                 .sheet(isPresented: $showAbout) { AboutView() }
+                .sheet(isPresented: $showHelp) {
+                    HelpView()
+                        .toolbar {
+                            ToolbarItem(placement: .confirmationAction) {
+                                Button("閉じる") { showHelp = false }
+                            }
+                        }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .showHelp)) { _ in
+                    showHelp = true
+                }
         }
         .commands {
             PixCurateCommands(showAbout: $showAbout)

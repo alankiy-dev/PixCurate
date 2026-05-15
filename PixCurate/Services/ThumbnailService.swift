@@ -6,6 +6,9 @@ enum ThumbnailService {
     @MainActor private static var cache: [URL: NSImage] = [:]
     @MainActor private static var fullCache: [URL: NSImage] = [:]
 
+    // 常に大サイズで生成してキャッシュ。縮小表示は SwiftUI に任せる（縮小は綺麗、拡大は汚い）
+    private static let fixedMaxPixel = 600
+
     /// CGImageSourceでインプロセスにサムネイル生成（サンドボックス対応）
     static func thumbnail(for url: URL, maxPixel: Int = 320) async -> NSImage? {
         if let cached = await MainActor.run(body: { cache[url] }) {
@@ -13,7 +16,7 @@ enum ThumbnailService {
         }
 
         let image = await Task.detached(priority: .userInitiated) {
-            Self.load(url: url, maxPixel: maxPixel)
+            Self.load(url: url, maxPixel: Self.fixedMaxPixel)
         }.value
 
         if let image {

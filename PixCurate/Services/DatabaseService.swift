@@ -58,6 +58,21 @@ final class DatabaseService: @unchecked Sendable {
         exec("CREATE INDEX IF NOT EXISTS idx_files_shot_date ON files(shot_date);")
         exec("CREATE INDEX IF NOT EXISTS idx_file_tags_path  ON file_tags(file_path);")
         exec("CREATE INDEX IF NOT EXISTS idx_file_tags_tag   ON file_tags(tag_name);")
+        exec("""
+            CREATE TABLE IF NOT EXISTS collections (
+                id         TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+        """)
+        exec("""
+            CREATE TABLE IF NOT EXISTS collection_files (
+                collection_id TEXT NOT NULL REFERENCES collections(id) ON DELETE CASCADE,
+                file_path     TEXT NOT NULL,
+                added_at      TEXT NOT NULL,
+                PRIMARY KEY (collection_id, file_path)
+            );
+        """)
         exec("PRAGMA foreign_keys = ON;")
     }
 
@@ -190,6 +205,128 @@ final class DatabaseService: @unchecked Sendable {
             }
             sqlite3_finalize(stmt)
             return count
+        }
+    }
+
+    // MARK: - Collections
+
+    struct CollectionRow: Sendable {
+        let id: String; let name: String; let createdAt: String; let fileCount: Int
+    }
+
+    nonisolated func loadCollections() -> [CollectionRow] {
+        queue.sync {
+            var rows: [CollectionRow] = []
+            let sql = """
+                SELECT c.id, c.name, c.created_at,
+                       COUNT(cf.file_path) AS file_count
+                FROM collections c
+                LEFT JOIN collection_files cf ON cf.collection_id = c.id
+                GROUP BY c.id ORDER BY c.created_at;
+            """
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    rows.append(CollectionRow(
+                        id:        String(cString: sqlite3_column_text(stmt, 0)),
+                        name:      String(cString: sqlite3_column_text(stmt, 1)),
+                        createdAt: String(cString: sqlite3_column_text(stmt, 2)),
+                        fileCount: Int(sqlite3_column_int(stmt, 3))
+                    ))
+                }
+            }
+            sqlite3_finalize(stmt)
+            return rows
+        }
+    }
+
+    nonisolated func insertCollection(id: String, name: String) {
+        queue.sync {
+            exec("INSERT INTO collections(id, name, created_at) VALUES (?,?,?);",
+                 bindings: [id, name, iso(Date())])
+        }
+    }
+
+    nonisolated func deleteCollection(id: String) {
+        queue.sync { exec("DELETE FROM collections WHERE id = ?;", bindings: [id]) }
+    }
+
+    nonisolated func renameCollection(id: String, name: String) {
+        queue.sync { exec("UPDATE collections SET name = ? WHERE id = ?;", bindings: [name, id]) }
+    }
+
+    nonisolated func addFiles(paths: [String], toCollection collectionId: String) {
+        queue.sync {
+            let date = iso(Date())
+            for path in paths {
+                exec("INSERT OR IGNORE INTO collection_files(collection_id, file_path, added_at) VALUES (?,?,?);",
+                     bindings: [collectionId, path, date])
+            }
+        }
+    }
+
+    nonisolated func removeFiles(paths: [String], fromCollection collectionId: String) {
+        queue.sync {
+            for path in paths {
+                exec("DELETE FROM collection_files WHERE collection_id = ? AND file_path = ?;",
+                     bindings: [collectionId, path])
+            }
+        }
+    }
+
+    nonisolated func filePathsInCollection(_ collectionId: String) -> Set<String> {
+        queue.sync {
+            var result = Set<String>()
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT file_path FROM collection_files WHERE collection_id = ?;",
+                                  -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, collectionId, -1, SQLITE_TRANSIENT_FN)
+                while sqlite3_step(stmt) == SQLITE_ROW {
+                    result.insert(String(cString: sqlite3_column_text(stmt, 0)))
+                }
+            }
+            sqlite3_finalize(stmt)
+            return result
+        }
+    }
+
+    nonisolated func fileCountInCollection(_ collectionId: String) -> Int {
+        queue.sync {
+            var stmt: OpaquePointer?
+            var count = 0
+            if sqlite3_prepare_v2(db,
+                "SELECT COUNT(*) FROM collection_files WHERE collection_id = ?;",
+                -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_bind_text(stmt, 1, collectionId, -1, SQLITE_TRANSIENT_FN)
+                if sqlite3_step(stmt) == SQLITE_ROW { count = Int(sqlite3_column_int(stmt, 0)) }
+            }
+            sqlite3_finalize(stmt)
+            return count
+        }
+    }
+
+    nonisolated func loadFiles(paths: Set<String>) -> [DBFileRow] {
+        guard !paths.isEmpty else { return [] }
+        return queue.sync {
+            var rows: [DBFileRow] = []
+            let sql = """
+                SELECT f.file_path, f.file_name, f.shot_date, f.rating,
+                       f.location_id, f.xmp_modified_at,
+                       GROUP_CONCAT(t.tag_name, '\t') AS tags
+                FROM files f
+                LEFT JOIN file_tags t ON t.file_path = f.file_path
+                WHERE f.file_path = ?
+                GROUP BY f.file_path;
+            """
+            for path in paths {
+                var stmt: OpaquePointer?
+                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                    sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT_FN)
+                    if sqlite3_step(stmt) == SQLITE_ROW { rows.append(DBFileRow(stmt: stmt!)) }
+                }
+                sqlite3_finalize(stmt)
+            }
+            return rows.sorted { $0.name < $1.name }
         }
     }
 

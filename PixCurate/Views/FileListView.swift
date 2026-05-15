@@ -6,8 +6,20 @@ struct FileListView: View {
     let files: [PhotoFile]
     let totalCount: Int
     @Binding var selection: Set<UUID>
+    let sortColumn: ListColumn?
+    let sortAscending: Bool
+    let onRateSelected: (Int?) -> Void
+    let onSort: (ListColumn?) -> Void
+    // コレクション
+    let collections: [PhotoCollection]
+    let activeCollectionId: UUID?
+    let onAddToCollection: (PhotoCollection, [PhotoFile]) -> Void
+    let onCreateAndAdd: ([PhotoFile]) -> Void
+    let onRemoveFromCollection: (([PhotoFile]) -> Void)?
+
     @Environment(DisplaySettings.self) var settings
     @Environment(\.openWindow) var openWindow
+    @State private var exifTarget: PhotoFile?
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: settings.thumbSize.width,
@@ -30,24 +42,181 @@ struct FileListView: View {
                     description: Text("コピー元フォルダを選択してください")
                 )
             }
+        } else if settings.viewMode == .grid {
+            gridView
         } else {
-            ScrollView {
-                LazyVGrid(columns: columns, spacing: settings.thumbSize.spacing) {
+            listView
+        }
+    }
+
+    // MARK: - Grid
+
+    private var gridView: some View {
+        ScrollView {
+            LazyVGrid(columns: columns, spacing: settings.thumbSize.spacing) {
+                ForEach(files) { file in
+                    PhotoCell(file: file, isSelected: selection.contains(file.id))
+                        .onTapGesture(count: 2) {
+                            openWindow(id: "photo-viewer", value: file.rawURL)
+                        }
+                        .onTapGesture {
+                            handleTap(file)
+                        }
+                        .contextMenu { cellContextMenu(for: file) }
+                }
+            }
+            .padding(12)
+        }
+        .onTapGesture { selection.removeAll() }
+        .focusable()
+        .onKeyPress(phases: .down) { handleKeyPress($0) }
+        .sheet(item: $exifTarget) { ExifInfoSheet(file: $0) }
+    }
+
+    // MARK: - List
+    // ヘッダーは ScrollView 外の VStack に置く。
+    // 行もヘッダーも同じ .padding(.horizontal, rowHPad) + 同一 HStack 構造 → 完全一致
+
+    // 表示中の列幅合計からコンテンツの最小幅を計算
+    private var listContentMinWidth: CGFloat {
+        let colsWidth = ListColumn.allCases
+            .filter { settings.listColumns.contains($0) }
+            .reduce(0) { $0 + $1.columnWidth }
+        return ListLayout.rowHPad * 2 + ListLayout.thumbWidth + ListLayout.thumbGap + 150 + colsWidth
+    }
+
+    private var listView: some View {
+        ScrollView([.horizontal, .vertical]) {
+            LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
+                Section {
                     ForEach(files) { file in
-                        PhotoCell(file: file, isSelected: selection.contains(file.id))
+                        PhotoListRow(file: file, isSelected: selection.contains(file.id))
+                            .padding(.horizontal, ListLayout.rowHPad)
+                            .contentShape(Rectangle())
                             .onTapGesture(count: 2) {
                                 openWindow(id: "photo-viewer", value: file.rawURL)
                             }
-                            .onTapGesture {
-                                handleTap(file)
-                            }
+                            .onTapGesture { handleTap(file) }
+                            .contextMenu { cellContextMenu(for: file) }
+                        Divider()
+                            .padding(.leading, ListLayout.rowHPad + ListLayout.rowLeading)
+                    }
+                } header: {
+                    VStack(spacing: 0) {
+                        listHeaderRow
+                        Divider()
+                    }
+                    .background(Color(NSColor.controlBackgroundColor))
+                }
+            }
+            .frame(minWidth: listContentMinWidth)
+        }
+        .onTapGesture { selection.removeAll() }
+        .focusable()
+        .onKeyPress(phases: .down) { handleKeyPress($0) }
+        .sheet(item: $exifTarget) { ExifInfoSheet(file: $0) }
+    }
+
+    private var listHeaderRow: some View {
+        // 行の HStack 構造と完全に同じ：
+        //   ① Color.clear(thumbWidth) + ② Color.clear(thumbGap) + ③ filename(flex) + ④ 各列(固定幅)
+        // 外側 padding も行と同じ rowHPad
+        HStack(spacing: 0) {
+            Color.clear.frame(width: ListLayout.thumbWidth)   // ① thumb 幅
+            Color.clear.frame(width: ListLayout.thumbGap)     // ② gap 幅
+
+            sortHeaderButton(label: "ファイル名", column: nil)
+                .frame(minWidth: 100, maxWidth: .infinity, alignment: .leading)
+
+            ForEach(ListColumn.allCases.filter { settings.listColumns.contains($0) }) { col in
+                Group {
+                    if col.needsEXIF {
+                        Text(col.label).font(.caption2).foregroundStyle(.tertiary)
+                    } else {
+                        sortHeaderButton(label: col.label, column: col)
                     }
                 }
-                .padding(12)
+                .frame(width: col.columnWidth, alignment: .leading)
             }
-            .onTapGesture { selection.removeAll() }
+        }
+        .padding(.horizontal, ListLayout.rowHPad)
+        .frame(height: 26)
+        .background(Color(NSColor.controlBackgroundColor))
+    }
+
+    private func sortHeaderButton(label: String, column: ListColumn?) -> some View {
+        let active = sortColumn == column
+        return HStack(spacing: 3) {
+            Text(label)
+                .font(.caption2)
+                .fontWeight(.semibold)
+            if active {
+                Image(systemName: sortAscending ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+            }
+        }
+        .foregroundStyle(active ? Color.accentColor : Color.secondary)
+        .contentShape(Rectangle())
+        .onTapGesture { onSort(column) }
+    }
+
+    // MARK: - Shared context menu
+
+    @ViewBuilder
+    private func cellContextMenu(for file: PhotoFile) -> some View {
+        Button { exifTarget = file } label: {
+            Label("情報を表示", systemImage: "info.circle")
+        }
+        Button { openWindow(id: "photo-viewer", value: file.rawURL) } label: {
+            Label("大きく表示", systemImage: "arrow.up.left.and.arrow.down.right")
+        }
+        Divider()
+        Menu("評価を設定") {
+            Button("★★★★★  5") { onRateSelected(5) }
+            Button("★★★★    4") { onRateSelected(4) }
+            Button("★★★      3") { onRateSelected(3) }
+            Button("★★        2") { onRateSelected(2) }
+            Button("★          1") { onRateSelected(1) }
+            Divider()
+            Button("評価を解除  0") { onRateSelected(nil) }
+        }
+        Divider()
+        // コレクション操作
+        let targets = contextTargets(for: file)
+        Menu("コレクションに追加") {
+            ForEach(collections) { col in
+                Button(col.name) { onAddToCollection(col, targets) }
+            }
+            if !collections.isEmpty { Divider() }
+            Button("新規コレクションを作成して追加…") { onCreateAndAdd(targets) }
+        }
+        if activeCollectionId != nil, let remove = onRemoveFromCollection {
+            Button(role: .destructive) { remove(targets) } label: {
+                Label("このコレクションから削除", systemImage: "minus.circle")
+            }
         }
     }
+
+    // 右クリックされたファイルが選択中なら選択全体、そうでなければそのファイルのみ
+    private func contextTargets(for file: PhotoFile) -> [PhotoFile] {
+        if selection.contains(file.id) {
+            return files.filter { selection.contains($0.id) }
+        }
+        return [file]
+    }
+
+    // MARK: - Key press
+
+    private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
+        guard !selection.isEmpty,
+              let ch = press.characters.first,
+              let digit = ch.wholeNumberValue,
+              (0...5).contains(digit) else { return .ignored }
+        onRateSelected(digit == 0 ? nil : digit)
+        return .handled
+    }
+
+    // MARK: - Tap handling (grid only)
 
     private func handleTap(_ file: PhotoFile) {
         if NSEvent.modifierFlags.contains(.command) {
@@ -88,7 +257,9 @@ struct PhotoCell: View {
                     .fill(Color.secondary.opacity(0.12))
                     .frame(width: w, height: h)
 
-                if let thumb = thumbnail {
+                if file.isOffline {
+                    OfflinePlaceholder(url: file.rawURL, size: CGSize(width: w, height: h))
+                } else if let thumb = thumbnail {
                     Image(nsImage: thumb)
                         .resizable()
                         .aspectRatio(contentMode: .fill)
@@ -176,14 +347,8 @@ struct PhotoCell: View {
             }
         }
         .task(id: file.rawURL) {
-            thumbnail = await ThumbnailService.thumbnail(for: file.rawURL,
-                                                         maxPixel: settings.thumbSize.maxPixel)
-        }
-        .onChange(of: settings.thumbSize) { _, _ in
-            Task {
-                thumbnail = await ThumbnailService.thumbnail(for: file.rawURL,
-                                                              maxPixel: settings.thumbSize.maxPixel)
-            }
+            guard !file.isOffline else { return }
+            thumbnail = await ThumbnailService.thumbnail(for: file.rawURL)
         }
     }
 
@@ -192,6 +357,32 @@ struct PhotoCell: View {
         guard let y = c.year, let mo = c.month, let d = c.day,
               let h = c.hour, let mi = c.minute else { return "" }
         return String(format: "%04d/%02d/%02d %02d:%02d", y, mo, d, h, mi)
+    }
+}
+
+// MARK: - OfflinePlaceholder
+
+struct OfflinePlaceholder: View {
+    let url: URL
+    let size: CGSize
+
+    private var volumeName: String {
+        url.volumeName ?? url.deletingLastPathComponent().path
+    }
+
+    var body: some View {
+        VStack(spacing: 4) {
+            Image(systemName: "externaldrive.badge.xmark")
+                .font(.system(size: min(size.width, size.height) * 0.28))
+                .foregroundStyle(.secondary)
+            Text(volumeName)
+                .font(.system(size: max(8, min(size.width * 0.09, 11))))
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 4)
+        }
+        .frame(width: size.width, height: size.height)
     }
 }
 

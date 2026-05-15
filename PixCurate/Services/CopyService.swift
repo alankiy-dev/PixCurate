@@ -19,10 +19,12 @@ struct CopyService: Sendable {
         keepStructure: Bool,
         baseURL: URL,
         dryRun: Bool,
-        log: @Sendable (String) -> Void
+        log: @Sendable (String) -> Void,
+        onProgress: (@Sendable (Int) -> Void)? = nil
     ) -> CopyProgress {
         var progress = CopyProgress()
         let fm = FileManager.default
+        var processed = 0
 
         for file in files {
             let dstRaw: URL
@@ -60,6 +62,8 @@ struct CopyService: Sendable {
                     progress.errors += 1
                 }
             }
+            processed += 1
+            onProgress?(processed)
         }
 
         return progress

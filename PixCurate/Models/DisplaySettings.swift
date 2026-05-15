@@ -1,10 +1,94 @@
 import Foundation
 import Observation
 
+// MARK: - ListColumn
+
+enum ListColumn: String, CaseIterable, Identifiable {
+    // DB items (instant)
+    case shotDate     = "shotDate"
+    case rating       = "rating"
+    case location     = "location"
+    case tags         = "tags"
+    case xmpDate      = "xmpDate"
+    // EXIF items (async, read from file)
+    case camera       = "camera"
+    case lens         = "lens"
+    case focalLength  = "focalLength"
+    case aperture     = "aperture"
+    case shutterSpeed = "shutterSpeed"
+    case iso          = "iso"
+    case resolution   = "resolution"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .shotDate:     return "撮影日時"
+        case .rating:       return "★評価"
+        case .location:     return "撮影地"
+        case .tags:         return "タグ"
+        case .xmpDate:      return "XMP更新日"
+        case .camera:       return "カメラ"
+        case .lens:         return "レンズ"
+        case .focalLength:  return "焦点距離"
+        case .aperture:     return "絞り"
+        case .shutterSpeed: return "SS"
+        case .iso:          return "ISO"
+        case .resolution:   return "解像度"
+        }
+    }
+
+    var needsEXIF: Bool {
+        switch self {
+        case .camera, .lens, .focalLength, .aperture, .shutterSpeed, .iso, .resolution:
+            return true
+        default:
+            return false
+        }
+    }
+
+    var columnWidth: CGFloat {
+        switch self {
+        case .shotDate:     return 130
+        case .rating:       return 48
+        case .location:     return 90
+        case .tags:         return 115
+        case .xmpDate:      return 130
+        case .camera:       return 155
+        case .lens:         return 165
+        case .focalLength:  return 58
+        case .aperture:     return 65
+        case .shutterSpeed: return 68
+        case .iso:          return 65
+        case .resolution:   return 98
+        }
+    }
+}
+
+// MARK: - List layout constants (shared between header and row)
+enum ListLayout {
+    static let thumbWidth:  CGFloat = 80
+    static let thumbHeight: CGFloat = 52
+    static let thumbGap:    CGFloat = 8    // explicit spacer between thumb and filename
+    static let rowHPad:     CGFloat = 8    // outer horizontal padding for both header and rows
+    static let rowVPad:     CGFloat = 3
+    // Total leading fixed space before filename (thumb + gap)
+    static let rowLeading: CGFloat = thumbWidth + thumbGap  // 88
+}
+
+// MARK: - DisplaySettings
+
 @Observable
 final class DisplaySettings {
 
     static let shared = DisplaySettings()
+
+    // MARK: - View mode
+    enum ViewMode: String, CaseIterable {
+        case grid = "グリッド"
+        case list = "リスト"
+    }
+    var viewMode: ViewMode = .grid
 
     // MARK: - Overlay badges (on thumbnail)
     var showRating: Bool   = true
@@ -32,6 +116,9 @@ final class DisplaySettings {
     }
     var badgeFont: BadgeFont = .small
 
+    // MARK: - List view columns
+    var listColumns: Set<ListColumn> = [.shotDate, .rating, .location, .tags]
+
     // MARK: - Persistence
 
     private enum K {
@@ -42,6 +129,8 @@ final class DisplaySettings {
         static let showShotDate = "ds.showShotDate"
         static let thumbSize    = "ds.thumbSize"
         static let badgeFont    = "ds.badgeFont"
+        static let viewMode     = "ds.viewMode"
+        static let listColumns  = "ds.listColumns"
     }
 
     init() { load() }
@@ -53,8 +142,12 @@ final class DisplaySettings {
         showLocation = d.object(forKey: K.showLocation) as? Bool ?? true
         showFilename = d.object(forKey: K.showFilename) as? Bool ?? true
         showShotDate = d.object(forKey: K.showShotDate) as? Bool ?? true
-        thumbSize    = ThumbSize(rawValue:  d.string(forKey: K.thumbSize)  ?? "") ?? .small
-        badgeFont    = BadgeFont(rawValue:  d.string(forKey: K.badgeFont)  ?? "") ?? .small
+        thumbSize    = ThumbSize(rawValue: d.string(forKey: K.thumbSize) ?? "") ?? .small
+        badgeFont    = BadgeFont(rawValue: d.string(forKey: K.badgeFont) ?? "") ?? .small
+        viewMode     = ViewMode(rawValue:  d.string(forKey: K.viewMode)  ?? "") ?? .grid
+        if let str = d.string(forKey: K.listColumns) {
+            listColumns = Set(str.split(separator: ",").compactMap { ListColumn(rawValue: String($0)) })
+        }
     }
 
     func save() {
@@ -66,5 +159,7 @@ final class DisplaySettings {
         d.set(showShotDate,       forKey: K.showShotDate)
         d.set(thumbSize.rawValue, forKey: K.thumbSize)
         d.set(badgeFont.rawValue, forKey: K.badgeFont)
+        d.set(viewMode.rawValue,  forKey: K.viewMode)
+        d.set(listColumns.map(\.rawValue).joined(separator: ","), forKey: K.listColumns)
     }
 }

@@ -8,6 +8,10 @@ private enum Keys {
     static let dstPath                  = "pixcurate.dstPath"
     static let minRating                = "pixcurate.minRating"
     static let keepStructure            = "pixcurate.keepStructure"
+    static let useShotDateFilter        = "pixcurate.useShotDateFilter"
+    static let shotDateFrom             = "pixcurate.shotDateFrom"
+    static let shotDateTo               = "pixcurate.shotDateTo"
+    static let shotDateFilterExpanded   = "pixcurate.filter.shotdate.expanded"
     static let useXmpSince              = "pixcurate.useXmpSince"
     static let xmpSinceDate             = "pixcurate.xmpSinceDate"
     static let ratingFilterExpanded     = "pixcurate.filter.rating.expanded"
@@ -15,6 +19,10 @@ private enum Keys {
     static let locationFilterExpanded   = "pixcurate.filter.location.expanded"
     static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
     static let presetExpanded           = "pixcurate.filter.preset.expanded"
+    static let folderExpanded           = "pixcurate.folder.expanded"
+    static let filterExpanded           = "pixcurate.filter.section.expanded"
+    static let collectionExpanded       = "pixcurate.collection.expanded"
+    static let copyExpanded             = "pixcurate.copy.expanded"
 }
 
 // MARK: - ViewModel
@@ -29,6 +37,8 @@ class FileListViewModel {
     var indexStatus = ""            // "DB: 123件" など
     var logLines: [String] = []
     var isRunning = false
+    var copyTotal: Int = 0
+    var copyCurrent: Int = 0
     var exiftoolMissing = false
 
     // MARK: - Load（DB優先 → 差分スキャン）
@@ -121,7 +131,61 @@ class FileListViewModel {
     }
 
     var locationFilter: Set<UUID> = []
+    var shotDateFrom: Date? = nil      // nilなら無効
+    var shotDateTo: Date? = nil
     var xmpSinceFilter: Date? = nil   // nilなら無効
+
+    // MARK: - Collection mode
+    var isCollectionMode: Bool = false
+
+    func loadCollection(_ collection: PhotoCollection, minRating: Int) {
+        isCollectionMode = true
+        isLoading = true
+        allFiles = []
+        filteredFiles = []
+        indexStatus = "\(collection.name) 読み込み中…"
+
+        Task.detached {
+            let files = CollectionStore.shared.loadFiles(in: collection)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                allFiles = files
+                applyFilter(minRating: minRating)
+                isLoading = false
+                indexStatus = "\(files.count)件"
+            }
+        }
+    }
+
+    func exitCollectionMode(srcURL: URL?, minRating: Int) {
+        isCollectionMode = false
+        if let url = srcURL {
+            load(from: url, minRating: minRating)
+        } else {
+            allFiles = []
+            filteredFiles = []
+            indexStatus = ""
+        }
+    }
+
+    // MARK: - List sort
+    var listSortColumn: ListColumn? = nil   // nil = ファイル名
+    var listSortAscending: Bool = true
+
+    func toggleListSort(column: ListColumn?, minRating: Int) {
+        if listSortColumn == column {
+            if listSortAscending {
+                listSortAscending = false
+            } else {
+                listSortColumn = nil
+                listSortAscending = true
+            }
+        } else {
+            listSortColumn = column
+            listSortAscending = true
+        }
+        applyFilter(minRating: minRating)
+    }
 
     func updateRating(for rawURL: URL, rating: Int?) {
         update(rawURL: rawURL) { $0.rating = rating }
@@ -153,52 +217,120 @@ class FileListViewModel {
     var filterGroups: [[String]] = []
 
     func applyFilter(minRating: Int) {
+        let cal = Calendar.current
         filteredFiles = allFiles.filter { file in
             let ratingOK = minRating == 0 || (file.rating ?? 0) >= minRating
             let tagOK = filterGroups.isEmpty || filterGroups.allSatisfy { group in
                 group.isEmpty || group.contains { file.tags.contains($0) }
             }
             let locationOK = locationFilter.isEmpty || (file.locationId.map { locationFilter.contains($0) } ?? false)
+            let shotDateOK: Bool
+            if shotDateFrom != nil || shotDateTo != nil {
+                guard let shot = file.shotDate else { return false }
+                let shotDay = cal.startOfDay(for: shot)
+                if let from = shotDateFrom, shotDay < cal.startOfDay(for: from) { return false }
+                if let to = shotDateTo, shotDay > cal.startOfDay(for: to) { return false }
+                shotDateOK = true
+            } else {
+                shotDateOK = true
+            }
             let xmpOK: Bool
             if let since = xmpSinceFilter {
-                let sinceDay = Calendar.current.startOfDay(for: since)
-                xmpOK = file.xmpModifiedAt.map { Calendar.current.startOfDay(for: $0) >= sinceDay } ?? false
+                let sinceDay = cal.startOfDay(for: since)
+                xmpOK = file.xmpModifiedAt.map { cal.startOfDay(for: $0) >= sinceDay } ?? false
             } else {
                 xmpOK = true
             }
-            return ratingOK && tagOK && locationOK && xmpOK
+            return ratingOK && tagOK && locationOK && shotDateOK && xmpOK
+        }
+        applyListSort()
+    }
+
+    private func applyListSort() {
+        let col = listSortColumn
+        let asc = listSortAscending
+        switch col {
+        case nil:
+            filteredFiles.sort { asc ? $0.filename < $1.filename : $0.filename > $1.filename }
+        case .shotDate:
+            filteredFiles.sort {
+                (asc ? $0.shotDate ?? .distantPast < $1.shotDate ?? .distantPast
+                     : $0.shotDate ?? .distantPast > $1.shotDate ?? .distantPast)
+            }
+        case .rating:
+            filteredFiles.sort {
+                let a = $0.rating ?? -1, b = $1.rating ?? -1
+                return asc ? a < b : a > b
+            }
+        case .location:
+            filteredFiles.sort {
+                let a = $0.locationPath.map { $0.sublocation ?? $0.city ?? $0.province ?? "" } ?? ""
+                let b = $1.locationPath.map { $0.sublocation ?? $0.city ?? $0.province ?? "" } ?? ""
+                return asc ? a < b : a > b
+            }
+        case .tags:
+            filteredFiles.sort {
+                let a = $0.tags.first ?? "", b = $1.tags.first ?? ""
+                return asc ? a < b : a > b
+            }
+        case .xmpDate:
+            filteredFiles.sort {
+                (asc ? $0.xmpModifiedAt ?? .distantPast < $1.xmpModifiedAt ?? .distantPast
+                     : $0.xmpModifiedAt ?? .distantPast > $1.xmpModifiedAt ?? .distantPast)
+            }
+        default:
+            filteredFiles.sort { $0.filename < $1.filename }
         }
     }
 
     func runCopy(to dst: URL, keepStructure: Bool, baseURL: URL, dryRun: Bool) {
         logLines = []
         isRunning = true
+        copyTotal = filteredFiles.count
+        copyCurrent = 0
         let files = filteredFiles
 
-        Task.detached {
+        Task.detached { [weak self] in
+            guard let self else { return }
             let service = CopyService()
-            // ログを一時バッファに収集してMainActorへ一括送信
-            nonisolated(unsafe) var buffer: [String] = []
             let result = service.copy(
                 files: files,
                 to: dst,
                 keepStructure: keepStructure,
                 baseURL: baseURL,
                 dryRun: dryRun,
-                log: { line in buffer.append(line) }
+                log: { line in
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.logLines.append(line)
+                    }
+                },
+                onProgress: { current in
+                    Task { @MainActor [weak self] in
+                        self?.copyCurrent = current
+                    }
+                }
             )
-            buffer.append("══════════════════════════════════")
-            buffer.append(dryRun
-                ? "✅ プレビュー対象  : \(result.copied) ファイル"
-                : "✅ コピー完了      : \(result.copied) ファイル")
-            buffer.append("⏭  スキップ（同一）: \(result.skipped) ファイル")
-            if result.errors > 0 { buffer.append("❌ エラー          : \(result.errors) ファイル") }
-            buffer.append("══════════════════════════════════")
-            let finalBuffer = buffer
+            let summary: [String] = {
+                var lines = ["══════════════════════════════════"]
+                lines.append(dryRun
+                    ? "✅ プレビュー対象  : \(result.copied) ファイル"
+                    : "✅ コピー完了      : \(result.copied) ファイル")
+                lines.append("⏭  スキップ（同一）: \(result.skipped) ファイル")
+                if result.errors > 0 { lines.append("❌ エラー          : \(result.errors) ファイル") }
+                lines.append("══════════════════════════════════")
+                return lines
+            }()
+            let shouldNotify = !dryRun
+            let copied = result.copied, skipped = result.skipped, errors = result.errors
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                logLines.append(contentsOf: finalBuffer)
+                logLines.append(contentsOf: summary)
+                copyCurrent = copyTotal
                 isRunning = false
+            }
+            if shouldNotify {
+                NotificationService.sendCopyComplete(copied: copied, skipped: skipped, errors: errors)
             }
         }
     }
@@ -217,13 +349,18 @@ struct ContentView: View {
     @State private var selection: Set<UUID> = []
     @State private var filterGroups: [TagFilterGroup] = []
     @State private var selectedLocationIds: Set<UUID> = []
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
     @State private var showRebuildConfirm = false  // メニュー「DB再構築…」から
-    @State private var ratingFilterExpanded   = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)   as? Bool ?? true
-    @State private var tagFilterExpanded      = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)      as? Bool ?? true
-    @State private var locationFilterExpanded = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded) as? Bool ?? true
-    @State private var xmpFilterExpanded      = UserDefaults.standard.object(forKey: Keys.xmpFilterExpanded)      as? Bool ?? true
+    @State private var ratingFilterExpanded    = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)    as? Bool ?? true
+    @State private var tagFilterExpanded       = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)       as? Bool ?? true
+    @State private var locationFilterExpanded  = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded)  as? Bool ?? true
+    @State private var shotDateFilterExpanded  = UserDefaults.standard.object(forKey: Keys.shotDateFilterExpanded)  as? Bool ?? true
+    @State private var useShotDateFilter: Bool = UserDefaults.standard.bool(forKey: Keys.useShotDateFilter)
+    @State private var shotDateFrom: Date      = UserDefaults.standard.object(forKey: Keys.shotDateFrom) as? Date ?? Calendar.current.date(byAdding: .month, value: -1, to: Date())!
+    @State private var shotDateTo: Date        = UserDefaults.standard.object(forKey: Keys.shotDateTo)   as? Date ?? Date()
+    @State private var xmpFilterExpanded       = UserDefaults.standard.object(forKey: Keys.xmpFilterExpanded)       as? Bool ?? true
     @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
     @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
         ?? Calendar.current.startOfDay(for: Date())
@@ -232,19 +369,37 @@ struct ContentView: View {
     @State private var showSavePreset = false
     @State private var presetName = ""
     @State private var editingPreset: FilterPreset?
+    // セクション折りたたみ
+    @State private var folderExpanded     = UserDefaults.standard.object(forKey: Keys.folderExpanded)     as? Bool ?? true
+    @State private var filterExpanded     = UserDefaults.standard.object(forKey: Keys.filterExpanded)     as? Bool ?? true
+    @State private var collectionExpanded = UserDefaults.standard.object(forKey: Keys.collectionExpanded) as? Bool ?? true
+    @State private var copyExpanded       = UserDefaults.standard.object(forKey: Keys.copyExpanded)       as? Bool ?? true
+    @State private var activeCollection: PhotoCollection?
+    @State private var showNewCollection = false
+    @State private var newCollectionName = ""
+    @State private var pendingCollectionFiles: [PhotoFile] = []
+    @State private var editingCollection: PhotoCollection?
+    @State private var editingCollectionName = ""
+    @State private var exportConfirm: (collection: PhotoCollection, dst: URL)? = nil
     @Environment(LocationStore.self) private var locationStore
     @Environment(DisplaySettings.self) private var displaySettings
     @Environment(FilterPresetStore.self) private var presetStore
+    @Environment(CollectionStore.self) private var collectionStore
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             sidebarView
-                .navigationSplitViewColumnWidth(min: 240, ideal: 280)
+                .frame(minWidth: 240)
+                .navigationSplitViewColumnWidth(min: 240, ideal: 280, max: 400)
         } detail: {
             detailView
         }
         .frame(minWidth: 740, minHeight: 520)
+        .onAppear {
+            columnVisibility = .all
+            NotificationService.requestPermission()
+        }
         .onChange(of: srcURL, initial: true) { _, newVal in
             BookmarkStore.save(url: newVal, key: Keys.srcPath)
             if let url = newVal {
@@ -268,6 +423,48 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .rebuildRequested)) { _ in
             if srcURL != nil { showRebuildConfirm = true }
         }
+        .onReceive(NotificationCenter.default.publisher(for: .resetWindowState)) { _ in
+            resetWindowState()
+        }
+        .onChange(of: displaySettings.viewMode) { _, newMode in
+            resizeWindowForMode(newMode)
+        }
+        .alert("エクスポートの確認", isPresented: Binding(
+            get: { exportConfirm != nil },
+            set: { if !$0 { exportConfirm = nil } }
+        )) {
+            Button("キャンセル", role: .cancel) { exportConfirm = nil }
+            Button("コピー実行") {
+                if let ec = exportConfirm {
+                    runExport(collection: ec.collection, dst: ec.dst)
+                }
+                exportConfirm = nil
+            }
+            .disabled(vm.filteredFiles.allSatisfy { $0.isOffline })
+        } message: {
+            Text(exportConfirmMessage)
+        }
+        .alert("新規コレクション", isPresented: $showNewCollection) {
+            TextField("コレクション名", text: $newCollectionName)
+            Button("キャンセル", role: .cancel) {}
+            Button("作成") {
+                let name = newCollectionName.trimmingCharacters(in: .whitespaces)
+                guard !name.isEmpty else { return }
+                let col = collectionStore.add(name: name)
+                if !pendingCollectionFiles.isEmpty {
+                    collectionStore.addFiles(pendingCollectionFiles, to: col)
+                    pendingCollectionFiles = []
+                }
+            }
+        } message: { Text("名前を入力してください") }
+        .alert("コレクション名の変更", isPresented: Binding(
+            get: { editingCollection != nil },
+            set: { if !$0 { editingCollection = nil } }
+        )) {
+            TextField("コレクション名", text: $editingCollectionName)
+            Button("キャンセル", role: .cancel) { editingCollection = nil }
+            Button("変更") { commitCollectionRename() }
+        } message: { Text("新しい名前を入力してください") }
         .alert("DB再構築の確認", isPresented: $showRebuildConfirm) {
             Button("キャンセル", role: .cancel) {}
             Button("再構築", role: .destructive) {
@@ -284,13 +481,19 @@ struct ContentView: View {
         VStack(spacing: 0) {
             List {
                 Section {
-                    FolderPickerRow(label: "コピー元", url: $srcURL)
-                    FolderPickerRow(label: "コピー先", url: $dstURL)
+                    if folderExpanded {
+                        FolderPickerRow(label: "コピー元", url: $srcURL)
+                        FolderPickerRow(label: "コピー先", url: $dstURL)
+                    }
                 } header: {
-                    sectionHeader("フォルダ")
+                    collapsibleHeader("フォルダ", color: .blue, expanded: folderExpanded, toggle: {
+                        folderExpanded.toggle()
+                        UserDefaults.standard.set(folderExpanded, forKey: Keys.folderExpanded)
+                    }, key: Keys.folderExpanded)
                 }
 
                 Section {
+                    if filterExpanded {
                     // 評価
                     DisclosureGroup(isExpanded: $ratingFilterExpanded) {
                         StarPickerView(selection: $minRating)
@@ -334,6 +537,52 @@ struct ContentView: View {
                         }
                     }
 
+                    // 撮影日
+                    DisclosureGroup(isExpanded: $shotDateFilterExpanded) {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Toggle("撮影日フィルター", isOn: $useShotDateFilter)
+                                .font(.callout)
+                                .onChange(of: useShotDateFilter) { _, v in
+                                    UserDefaults.standard.set(v, forKey: Keys.useShotDateFilter)
+                                    applyShotDateFilter()
+                                }
+                            if useShotDateFilter {
+                                HStack(spacing: 6) {
+                                    Text("From")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28, alignment: .leading)
+                                    DatePicker("", selection: $shotDateFrom, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .datePickerStyle(.compact)
+                                        .onChange(of: shotDateFrom) { _, v in
+                                            UserDefaults.standard.set(v, forKey: Keys.shotDateFrom)
+                                            applyShotDateFilter()
+                                        }
+                                }
+                                HStack(spacing: 6) {
+                                    Text("To")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .frame(width: 28, alignment: .leading)
+                                    DatePicker("", selection: $shotDateTo, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .datePickerStyle(.compact)
+                                        .onChange(of: shotDateTo) { _, v in
+                                            UserDefaults.standard.set(v, forKey: Keys.shotDateTo)
+                                            applyShotDateFilter()
+                                        }
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    } label: {
+                        filterLabel("撮影日", icon: "camera", color: .teal)
+                    }
+                    .onChange(of: shotDateFilterExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.shotDateFilterExpanded)
+                    }
+
                     // XMP更新日
                     DisclosureGroup(isExpanded: $xmpFilterExpanded) {
                         VStack(alignment: .leading, spacing: 6) {
@@ -344,16 +593,17 @@ struct ContentView: View {
                                     applyXmpFilter()
                                 }
                             if useXmpSince {
-                                DatePicker(
-                                    "以降",
-                                    selection: $xmpSinceDate,
-                                    displayedComponents: .date
-                                )
-                                .datePickerStyle(.compact)
-                                .font(.callout)
-                                .onChange(of: xmpSinceDate) { _, v in
-                                    UserDefaults.standard.set(v, forKey: Keys.xmpSinceDate)
-                                    applyXmpFilter()
+                                HStack(spacing: 4) {
+                                    DatePicker("", selection: $xmpSinceDate, displayedComponents: .date)
+                                        .labelsHidden()
+                                        .datePickerStyle(.compact)
+                                        .onChange(of: xmpSinceDate) { _, v in
+                                            UserDefaults.standard.set(v, forKey: Keys.xmpSinceDate)
+                                            applyXmpFilter()
+                                        }
+                                    Text("以降に更新した画像")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                         }
@@ -364,11 +614,8 @@ struct ContentView: View {
                     .onChange(of: xmpFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.xmpFilterExpanded)
                     }
-                } header: {
-                    sectionHeader("フィルター")
-                }
 
-                Section {
+                    // プリセット（フィルターの一部として配置）
                     DisclosureGroup(isExpanded: $presetExpanded) {
                         if presetStore.presets.isEmpty {
                             Text("保存済みのプリセットはありません")
@@ -444,16 +691,48 @@ struct ContentView: View {
                     .onChange(of: presetExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.presetExpanded)
                     }
+                    } // if filterExpanded
+                } header: {
+                    collapsibleHeader("フィルター", color: .orange, expanded: filterExpanded, toggle: {
+                        filterExpanded.toggle()
+                        UserDefaults.standard.set(filterExpanded, forKey: Keys.filterExpanded)
+                    }, key: Keys.filterExpanded)
                 }
 
                 Section {
-                    Toggle("フォルダ構造を維持", isOn: $keepStructure)
-                        .onChange(of: keepStructure) { _, v in
-                            UserDefaults.standard.set(v, forKey: Keys.keepStructure)
-                        }
-                    copySection
+                    collectionSection
                 } header: {
-                    sectionHeader("コピー")
+                    collapsibleHeader("コレクション", color: .purple, expanded: collectionExpanded, toggle: {
+                        collectionExpanded.toggle()
+                        UserDefaults.standard.set(collectionExpanded, forKey: Keys.collectionExpanded)
+                    }, key: Keys.collectionExpanded, trailing: {
+                        AnyView(
+                            Button {
+                                newCollectionName = ""
+                                pendingCollectionFiles = []
+                                showNewCollection = true
+                            } label: {
+                                Image(systemName: "plus").font(.caption)
+                            }
+                            .buttonStyle(.borderless)
+                            .help("新規コレクション")
+                        )
+                    })
+                }
+
+                Section {
+                    if copyExpanded {
+                        Toggle("フォルダ構造を維持", isOn: $keepStructure)
+                            .onChange(of: keepStructure) { _, v in
+                                UserDefaults.standard.set(v, forKey: Keys.keepStructure)
+                            }
+                        copySection
+                    }
+                } header: {
+                    collapsibleHeader("コピー", color: .green, expanded: copyExpanded, toggle: {
+                        copyExpanded.toggle()
+                        UserDefaults.standard.set(copyExpanded, forKey: Keys.copyExpanded)
+                    }, key: Keys.copyExpanded)
                 }
             }
             .listStyle(.sidebar)
@@ -483,12 +762,107 @@ struct ContentView: View {
         }
     }
 
-    private func sectionHeader(_ title: String) -> some View {
+    // MARK: - Collection section
+
+    @ViewBuilder
+    private var collectionSection: some View {
+        if collectionExpanded {
+        if collectionStore.collections.isEmpty {
+            Text("コレクションなし")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            ForEach(collectionStore.collections) { col in
+                let isActive = activeCollection?.id == col.id
+                HStack(spacing: 6) {
+                    Button {
+                        if isActive {
+                            activeCollection = nil
+                            vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
+                        } else {
+                            activeCollection = col
+                            vm.loadCollection(col, minRating: minRating)
+                        }
+                    } label: {
+                        HStack(spacing: 6) {
+                            Image(systemName: isActive
+                                  ? "rectangle.stack.fill"
+                                  : "rectangle.stack")
+                                .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                                .font(.caption)
+                            Text(col.name)
+                                .font(.callout)
+                                .fontWeight(isActive ? .semibold : .regular)
+                            Spacer()
+                            Text("\(col.fileCount)")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+
+                    Button {
+                        editingCollection = col
+                        editingCollectionName = col.name
+                    } label: {
+                        Image(systemName: "square.and.pencil").font(.caption)
+                    }
+                    .buttonStyle(.borderless)
+
+                    Button(role: .destructive) {
+                        if activeCollection?.id == col.id {
+                            activeCollection = nil
+                            vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
+                        }
+                        collectionStore.delete(col)
+                    } label: {
+                        Image(systemName: "trash")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                    .buttonStyle(.borderless)
+                }
+                .padding(.vertical, 3)
+                .padding(.horizontal, 6)
+                .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+                .clipShape(RoundedRectangle(cornerRadius: 6))
+            }
+        }
+        }
+    }
+
+    private func sectionHeader(_ title: String, color: Color = .secondary) -> some View {
         Text(title)
-            .font(.subheadline)
-            .fontWeight(.semibold)
-            .foregroundStyle(.primary)
+            .font(.caption)
+            .fontWeight(.bold)
             .textCase(nil)
+            .foregroundStyle(color)
+    }
+
+    private func collapsibleHeader(_ title: String, color: Color, expanded: Bool, toggle: @escaping () -> Void, key: String, trailing: (() -> AnyView)? = nil) -> some View {
+        HStack(spacing: 4) {
+            Text(title)
+                .font(.caption)
+                .fontWeight(.bold)
+                .textCase(nil)
+                .foregroundStyle(color)
+            Spacer()
+            if let trailing { trailing() }
+            Button {
+                toggle()
+            } label: {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                    .font(.caption2)
+                    .foregroundStyle(color.opacity(0.7))
+            }
+            .buttonStyle(.borderless)
+        }
+        .padding(.vertical, 5)
+        .background(
+            color.opacity(0.10)
+                .padding(.horizontal, -50)
+        )
     }
 
     private func filterLabel(_ title: String, icon: String, color: Color) -> some View {
@@ -515,6 +889,12 @@ struct ContentView: View {
         if clearPreset { activePresetId = nil }
     }
 
+    private func applyShotDateFilter() {
+        vm.shotDateFrom = useShotDateFilter ? shotDateFrom : nil
+        vm.shotDateTo   = useShotDateFilter ? shotDateTo   : nil
+        vm.applyFilter(minRating: minRating)
+    }
+
     private func applyXmpFilter(clearPreset: Bool = true) {
         vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
         vm.applyFilter(minRating: minRating)
@@ -535,6 +915,151 @@ struct ContentView: View {
             locationIds: Array(selectedLocationIds)
         )
         presetStore.add(preset)
+    }
+
+    private func applyRatingToSelection(rating: Int?) {
+        let files = vm.filteredFiles.filter { selection.contains($0.id) }
+        guard !files.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            for file in files {
+                _ = XMPService.writeRating(to: file.xmpURL, rating: rating ?? 0)
+            }
+            let updates = files.map { $0.rawURL }
+            await MainActor.run {
+                for url in updates {
+                    vm.updateRating(for: url, rating: rating)
+                }
+            }
+        }
+    }
+
+    private var exportConfirmMessage: String {
+        guard let ec = exportConfirm else { return "" }
+        let files = vm.filteredFiles
+        let offlineGroups = collectionStore.offlineGroups(in: files)
+        let offlineCount = files.filter(\.isOffline).count
+        var lines: [String] = []
+        lines.append("コレクション「\(ec.collection.name)」\(files.count) 件")
+        lines.append("コピー先: \(ec.dst.path)")
+        if !offlineGroups.isEmpty {
+            lines.append("")
+            lines.append("⚠️ \(offlineCount) 件が見つかりません（スキップされます）:")
+            for g in offlineGroups {
+                lines.append("  • \(g.volume)（\(g.count) 件）")
+            }
+            lines.append("該当するディスクを接続してから実行するとすべてコピーできます。")
+        }
+        return lines.joined(separator: "\n")
+    }
+
+    private func commitCollectionRename() {
+        guard let col = editingCollection else { return }
+        let name = editingCollectionName.trimmingCharacters(in: .whitespaces)
+        if !name.isEmpty { collectionStore.rename(col, to: name) }
+        if activeCollection?.id == col.id {
+            activeCollection = collectionStore.collections.first { $0.id == col.id }
+        }
+        editingCollection = nil
+    }
+
+    private func exportCollection(_ collection: PhotoCollection) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "エクスポート先を選択"
+        panel.message = "「\(collection.name)」のファイルをコピーします"
+        guard panel.runModal() == .OK, let dst = panel.url else { return }
+        exportConfirm = (collection: collection, dst: dst)
+    }
+
+    private func runExport(collection: PhotoCollection, dst: URL) {
+        let files = vm.filteredFiles
+        vm.logLines = []
+        vm.isRunning = true
+        vm.copyTotal = files.count
+        vm.copyCurrent = 0
+
+        Task.detached {
+            let service = CopyService()
+            let result = service.copy(
+                files: files,
+                to: dst,
+                keepStructure: false,
+                baseURL: dst,
+                dryRun: false,
+                log: { line in
+                    Task { @MainActor in vm.logLines.append(line) }
+                },
+                onProgress: { current in
+                    Task { @MainActor in vm.copyCurrent = current }
+                }
+            )
+            let summary: [String] = {
+                var lines = ["══════════════════════════════════"]
+                lines.append("✅ コピー完了: \(result.copied) ファイル")
+                if result.skipped > 0 { lines.append("⏭  スキップ: \(result.skipped) ファイル") }
+                if result.errors  > 0 { lines.append("❌ エラー: \(result.errors) ファイル") }
+                lines.append("══════════════════════════════════")
+                return lines
+            }()
+            let copied = result.copied, skipped = result.skipped, errors = result.errors
+            await MainActor.run {
+                vm.logLines.append(contentsOf: summary)
+                vm.copyCurrent = vm.copyTotal
+                vm.isRunning = false
+            }
+            NotificationService.sendCopyComplete(copied: copied, skipped: skipped, errors: errors)
+        }
+    }
+
+    private func resizeWindowForMode(_ mode: DisplaySettings.ViewMode) {
+        guard let window = NSApp.keyWindow ?? NSApp.mainWindow else { return }
+        let screen = window.screen ?? NSScreen.main!
+        let sf = screen.visibleFrame
+        var frame = window.frame
+
+        switch mode {
+        case .list:
+            // 列幅の合計に合わせて横を広げる（画面幅を超えない）
+            let idealWidth: CGFloat = min(1500, sf.width)
+            frame.origin.x = max(sf.minX, frame.origin.x - (idealWidth - frame.width) / 2)
+            frame.size.width = idealWidth
+            // 画面からはみ出ないよう補正
+            if frame.maxX > sf.maxX { frame.origin.x = sf.maxX - frame.width }
+        case .grid:
+            let idealWidth: CGFloat = 1100
+            frame.origin.x += (frame.width - idealWidth) / 2
+            frame.size.width = idealWidth
+            if frame.minX < sf.minX { frame.origin.x = sf.minX }
+        }
+
+        window.setFrame(frame, display: true, animate: true)
+    }
+
+    private func resetWindowState() {
+        // 表示設定をデフォルトに戻す
+        displaySettings.viewMode    = .grid
+        displaySettings.thumbSize   = .small
+        displaySettings.badgeFont   = .small
+        displaySettings.showRating  = true
+        displaySettings.showTags    = true
+        displaySettings.showLocation = true
+        displaySettings.showFilename = true
+        displaySettings.showShotDate = true
+        displaySettings.save()
+
+        // サイドバーを表示
+        columnVisibility = .all
+
+        // ウィンドウを最適サイズ・中央に
+        if let window = NSApp.keyWindow ?? NSApp.mainWindow {
+            let size = NSSize(width: 1100, height: 720)
+            let screen = window.screen ?? NSScreen.main!
+            let sf = screen.visibleFrame
+            let origin = CGPoint(x: sf.midX - size.width / 2, y: sf.midY - size.height / 2)
+            window.setFrame(NSRect(origin: origin, size: size), display: true, animate: true)
+        }
     }
 
     private func applyPreset(_ preset: FilterPreset) {
@@ -632,7 +1157,17 @@ struct ContentView: View {
                         }
                     }
                     Spacer()
-                    if let url = srcURL, !vm.isLoading {
+                    if let col = activeCollection, !vm.isLoading {
+                        Button {
+                            exportCollection(col)
+                        } label: {
+                            Label("エクスポート", systemImage: "square.and.arrow.up")
+                                .font(.system(size: 11))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("コレクションをフォルダにコピー")
+                    }
+                    if let url = srcURL, !vm.isLoading, !vm.isCollectionMode {
                         Button {
                             vm.rescan(from: url, minRating: minRating)
                         } label: {
@@ -696,15 +1231,49 @@ struct ContentView: View {
 
                 Divider()
 
-                FileListView(files: vm.filteredFiles, totalCount: vm.allFiles.count, selection: $selection)
+                FileListView(
+                    files: vm.filteredFiles,
+                    totalCount: vm.allFiles.count,
+                    selection: $selection,
+                    sortColumn: vm.listSortColumn,
+                    sortAscending: vm.listSortAscending,
+                    onRateSelected: { applyRatingToSelection(rating: $0) },
+                    onSort: { vm.toggleListSort(column: $0, minRating: minRating) },
+                    collections: collectionStore.collections,
+                    activeCollectionId: activeCollection?.id,
+                    onAddToCollection: { col, files in
+                        collectionStore.addFiles(files, to: col)
+                    },
+                    onCreateAndAdd: { files in
+                        pendingCollectionFiles = files
+                        newCollectionName = ""
+                        showNewCollection = true
+                    },
+                    onRemoveFromCollection: activeCollection.map { col in
+                        { files in
+                            collectionStore.removeFiles(files, from: col)
+                            vm.loadCollection(col, minRating: minRating)
+                        }
+                    }
+                )
 
                 if !vm.logLines.isEmpty || vm.isRunning {
                     Divider()
                     VStack(spacing: 0) {
-                        HStack(spacing: 4) {
-                            Text("ログ")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
+                        HStack(spacing: 6) {
+                            if vm.isRunning {
+                                ProgressView()
+                                    .scaleEffect(0.6)
+                                    .frame(width: 14, height: 14)
+                                Text("\(vm.copyCurrent) / \(vm.copyTotal) ファイル")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .monospacedDigit()
+                            } else {
+                                Text("ログ")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
                             Spacer()
                             if !vm.isRunning {
                                 Button {
@@ -721,9 +1290,17 @@ struct ContentView: View {
                         .padding(.vertical, 4)
                         .background(.bar)
 
+                        if vm.isRunning && vm.copyTotal > 0 {
+                            ProgressView(value: Double(vm.copyCurrent), total: Double(vm.copyTotal))
+                                .progressViewStyle(.linear)
+                                .padding(.horizontal, 8)
+                                .padding(.bottom, 4)
+                                .background(.bar)
+                        }
+
                         logView
                     }
-                    .frame(height: 160)
+                    .frame(height: 180)
                 }
             }
 
