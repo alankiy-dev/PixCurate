@@ -4,12 +4,17 @@ import Observation
 // MARK: - UserDefaults keys
 
 private enum Keys {
-    static let srcPath          = "pixcurate.srcPath"
-    static let dstPath          = "pixcurate.dstPath"
-    static let minRating        = "pixcurate.minRating"
-    static let keepStructure    = "pixcurate.keepStructure"
-    static let useXmpSince      = "pixcurate.useXmpSince"
-    static let xmpSinceDate     = "pixcurate.xmpSinceDate"
+    static let srcPath                  = "pixcurate.srcPath"
+    static let dstPath                  = "pixcurate.dstPath"
+    static let minRating                = "pixcurate.minRating"
+    static let keepStructure            = "pixcurate.keepStructure"
+    static let useXmpSince              = "pixcurate.useXmpSince"
+    static let xmpSinceDate             = "pixcurate.xmpSinceDate"
+    static let ratingFilterExpanded     = "pixcurate.filter.rating.expanded"
+    static let tagFilterExpanded        = "pixcurate.filter.tag.expanded"
+    static let locationFilterExpanded   = "pixcurate.filter.location.expanded"
+    static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
+    static let presetExpanded           = "pixcurate.filter.preset.expanded"
 }
 
 // MARK: - ViewModel
@@ -215,14 +220,14 @@ struct ContentView: View {
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
     @State private var showRebuildConfirm = false  // メニュー「DB再構築…」から
-    @State private var ratingFilterExpanded = true
-    @State private var tagFilterExpanded = true
-    @State private var locationFilterExpanded = true
-    @State private var xmpFilterExpanded = true
+    @State private var ratingFilterExpanded   = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)   as? Bool ?? true
+    @State private var tagFilterExpanded      = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)      as? Bool ?? true
+    @State private var locationFilterExpanded = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded) as? Bool ?? true
+    @State private var xmpFilterExpanded      = UserDefaults.standard.object(forKey: Keys.xmpFilterExpanded)      as? Bool ?? true
     @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
     @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
         ?? Calendar.current.startOfDay(for: Date())
-    @State private var presetExpanded = true
+    @State private var presetExpanded = UserDefaults.standard.object(forKey: Keys.presetExpanded) as? Bool ?? true
     @State private var activePresetId: UUID?
     @State private var showSavePreset = false
     @State private var presetName = ""
@@ -293,6 +298,9 @@ struct ContentView: View {
                     } label: {
                         filterLabel("評価", icon: "star.fill", color: .yellow)
                     }
+                    .onChange(of: ratingFilterExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.ratingFilterExpanded)
+                    }
 
                     // タグ
                     if !tagStore.tags.isEmpty {
@@ -304,6 +312,9 @@ struct ContentView: View {
                             )
                         } label: {
                             filterLabel("タグ", icon: "tag.fill", color: .blue)
+                        }
+                        .onChange(of: tagFilterExpanded) { _, v in
+                            UserDefaults.standard.set(v, forKey: Keys.tagFilterExpanded)
                         }
                     }
 
@@ -317,6 +328,9 @@ struct ContentView: View {
                             )
                         } label: {
                             filterLabel("撮影地", icon: "mappin.and.ellipse", color: .red)
+                        }
+                        .onChange(of: locationFilterExpanded) { _, v in
+                            UserDefaults.standard.set(v, forKey: Keys.locationFilterExpanded)
                         }
                     }
 
@@ -346,6 +360,9 @@ struct ContentView: View {
                         .padding(.vertical, 4)
                     } label: {
                         filterLabel("更新日", icon: "calendar.badge.clock", color: .orange)
+                    }
+                    .onChange(of: xmpFilterExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.xmpFilterExpanded)
                     }
                 } header: {
                     sectionHeader("フィルター")
@@ -423,6 +440,9 @@ struct ContentView: View {
                         }
                     } label: {
                         sectionHeader("プリセット")
+                    }
+                    .onChange(of: presetExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.presetExpanded)
                     }
                 }
 
