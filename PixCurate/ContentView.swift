@@ -214,7 +214,7 @@ struct ContentView: View {
     @State private var selectedLocationIds: Set<UUID> = []
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
-    @State private var showRebuildConfirm = false
+    @State private var showRebuildConfirm = false  // メニュー「DB再構築…」から
     @State private var ratingFilterExpanded = true
     @State private var tagFilterExpanded = true
     @State private var locationFilterExpanded = true
@@ -256,6 +256,20 @@ struct ContentView: View {
             UserDefaults.standard.set(newVal, forKey: Keys.minRating)
             vm.applyFilter(minRating: newVal)
             clearActivePreset()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .rescanRequested)) { _ in
+            if let url = srcURL { vm.rescan(from: url, minRating: minRating) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .rebuildRequested)) { _ in
+            if srcURL != nil { showRebuildConfirm = true }
+        }
+        .alert("DB再構築の確認", isPresented: $showRebuildConfirm) {
+            Button("キャンセル", role: .cancel) {}
+            Button("再構築", role: .destructive) {
+                if let url = srcURL { vm.rebuildDB(from: url, minRating: minRating) }
+            }
+        } message: {
+            Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
         }
     }
 
@@ -609,23 +623,6 @@ struct ContentView: View {
                         .disabled(vm.isIndexing)
                         .help("再スキャン")
 
-                        Button {
-                            showRebuildConfirm = true
-                        } label: {
-                            Image(systemName: "arrow.triangle.2.circlepath")
-                                .font(.system(size: 12))
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(vm.isIndexing)
-                        .help("DB再構築（全ファイルを再スキャン）")
-                        .alert("DB再構築の確認", isPresented: $showRebuildConfirm) {
-                            Button("キャンセル", role: .cancel) {}
-                            Button("再構築", role: .destructive) {
-                                vm.rebuildDB(from: url, minRating: minRating)
-                            }
-                        } message: {
-                            Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
-                        }
                     }
                     if !vm.filteredFiles.isEmpty {
                         Button {
