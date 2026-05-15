@@ -91,6 +91,30 @@ class FileListViewModel {
         }
     }
 
+    // MARK: - DB再構築（全削除→フルスキャン）
+
+    func rebuildDB(from url: URL, minRating: Int) {
+        guard !isIndexing else { return }
+        isIndexing = true
+        isLoading = true
+        allFiles = []
+        filteredFiles = []
+        indexStatus = "DB再構築中…"
+
+        Task.detached {
+            DatabaseService.shared.deleteAll(under: url)
+            let (files, result) = IndexService.fullScan(folder: url)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                allFiles = files
+                applyFilter(minRating: minRating)
+                isLoading = false
+                isIndexing = false
+                indexStatus = "DB再構築完了: \(files.count)件"
+            }
+        }
+    }
+
     var locationFilter: Set<UUID> = []
     var xmpSinceFilter: Date? = nil   // nilなら無効
 
@@ -190,6 +214,7 @@ struct ContentView: View {
     @State private var selectedLocationIds: Set<UUID> = []
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
+    @State private var showRebuildConfirm = false
     @State private var ratingFilterExpanded = true
     @State private var tagFilterExpanded = true
     @State private var locationFilterExpanded = true
@@ -583,6 +608,24 @@ struct ContentView: View {
                         .buttonStyle(.borderless)
                         .disabled(vm.isIndexing)
                         .help("再スキャン")
+
+                        Button {
+                            showRebuildConfirm = true
+                        } label: {
+                            Image(systemName: "arrow.triangle.2.circlepath")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(vm.isIndexing)
+                        .help("DB再構築（全ファイルを再スキャン）")
+                        .alert("DB再構築の確認", isPresented: $showRebuildConfirm) {
+                            Button("キャンセル", role: .cancel) {}
+                            Button("再構築", role: .destructive) {
+                                vm.rebuildDB(from: url, minRating: minRating)
+                            }
+                        } message: {
+                            Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
+                        }
                     }
                     if !vm.filteredFiles.isEmpty {
                         Button {

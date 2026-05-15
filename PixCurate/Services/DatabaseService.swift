@@ -96,6 +96,13 @@ final class DatabaseService: @unchecked Sendable {
         queue.sync { exec("DELETE FROM files WHERE file_path = ?;", bindings: [path]) }
     }
 
+    nonisolated func deleteAll(under folder: URL) {
+        queue.sync {
+            let pattern = escapeLike(folder.path + "/") + "%"
+            exec("DELETE FROM files WHERE file_path LIKE ? ESCAPE '\\';", bindings: [pattern])
+        }
+    }
+
     // MARK: - Query
 
     /// folder配下の全ファイルをDBから取得
