@@ -18,96 +18,102 @@ class FileListViewModel {
     var allFiles: [PhotoFile] = []
     var filteredFiles: [PhotoFile] = []
     var isLoading = false
+    var isIndexing = false          // バックグラウンド差分スキャン中
+    var indexStatus = ""            // "DB: 123件" など
     var logLines: [String] = []
     var isRunning = false
     var exiftoolMissing = false
+
+    // MARK: - Load（DB優先 → 差分スキャン）
 
     func load(from url: URL, minRating: Int) {
         isLoading = true
         allFiles = []
         filteredFiles = []
-        exiftoolMissing = false
+        indexStatus = ""
 
         Task.detached {
-            let result = FileListViewModel.scan(url: url)
+            // 1. DBに既存データがあれば即ロード
+            let cached = IndexService.loadFromDB(folder: url)
+            let hasCached = !cached.isEmpty
+
             await MainActor.run { [weak self] in
                 guard let self else { return }
-                exiftoolMissing = result.exiftoolMissing
-                var files = result.files
-                let locStore = LocationStore.shared
-                for i in files.indices {
-                    if let path = files[i].locationPath {
-                        files[i].locationId = locStore.match(path: path)
-                    }
+                if hasCached {
+                    allFiles = cached
+                    applyFilter(minRating: minRating)
+                    isLoading = false
+                    isIndexing = true
+                    indexStatus = "DB: \(cached.count)件（更新確認中…）"
                 }
+            }
+
+            // 2. バックグラウンドで差分スキャン
+            let (files, scanResult) = IndexService.fullScan(folder: url)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
                 allFiles = files
                 applyFilter(minRating: minRating)
                 isLoading = false
+                isIndexing = false
+                indexStatus = "DB: \(files.count)件"
+                if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
+                    let parts = [
+                        scanResult.added   > 0 ? "新規\(scanResult.added)件"   : nil,
+                        scanResult.updated > 0 ? "更新\(scanResult.updated)件" : nil,
+                        scanResult.removed > 0 ? "削除\(scanResult.removed)件" : nil,
+                    ].compactMap { $0 }.joined(separator: " / ")
+                    indexStatus = "DB: \(files.count)件（\(parts)）"
+                }
             }
         }
     }
 
-    private nonisolated static func scan(url: URL) -> (files: [PhotoFile], exiftoolMissing: Bool) {
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3"]
-        let fm = FileManager.default
-        var scanned: [PhotoFile] = []
+    // MARK: - 再スキャン（強制フルスキャン）
 
-        guard let enumerator = fm.enumerator(
-            at: url,
-            includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else {
-            return ([], false)
-        }
+    func rescan(from url: URL, minRating: Int) {
+        guard !isIndexing else { return }
+        isIndexing = true
+        indexStatus = "再スキャン中…"
 
-        while let fileURL = enumerator.nextObject() as? URL {
-            guard rawExtensions.contains(fileURL.pathExtension.lowercased()) else { continue }
-            var file = PhotoFile(rawURL: fileURL)
-            let xmpURL = file.xmpURL
-            if fm.fileExists(atPath: xmpURL.path) {
-                // XMPを直接テキスト解析（exiftool不要・サンドボックス対応）
-                file.rating = XMPService.readRating(xmpURL: xmpURL)
-                file.tags = XMPTagService.readTags(xmpURL: xmpURL)
-                file.locationPath = XMPLocationService.readLocation(xmpURL: xmpURL)
+        Task.detached {
+            let (files, result) = IndexService.fullScan(folder: url)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                allFiles = files
+                applyFilter(minRating: minRating)
+                isIndexing = false
+                indexStatus = "DB: \(files.count)件（新規\(result.added) 更新\(result.updated) 削除\(result.removed)）"
             }
-            // Prefer EXIF shooting date; fall back to file modification date
-            file.shotDate = EXIFService.readShotDate(url: fileURL)
-                ?? (try? fm.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
-            scanned.append(file)
         }
-
-        scanned.sort { $0.filename < $1.filename }
-        return (scanned, false)
     }
 
     var locationFilter: Set<UUID> = []
 
     func updateRating(for rawURL: URL, rating: Int?) {
-        if let idx = allFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            allFiles[idx].rating = rating
-        }
-        if let idx = filteredFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            filteredFiles[idx].rating = rating
-        }
+        update(rawURL: rawURL) { $0.rating = rating }
     }
 
     func updateTags(for rawURL: URL, tags: [String]) {
-        if let idx = allFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            allFiles[idx].tags = tags
-        }
-        if let idx = filteredFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            filteredFiles[idx].tags = tags
-        }
+        update(rawURL: rawURL) { $0.tags = tags }
     }
 
     func updateLocation(for rawURL: URL, locationId: UUID?, locationPath: LocationPath?) {
+        update(rawURL: rawURL) {
+            $0.locationId = locationId
+            $0.locationPath = locationPath
+        }
+    }
+
+    private func update(rawURL: URL, mutation: (inout PhotoFile) -> Void) {
         if let idx = allFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            allFiles[idx].locationId = locationId
-            allFiles[idx].locationPath = locationPath
+            mutation(&allFiles[idx])
+            let file = allFiles[idx]
+            Task.detached { DatabaseService.shared.upsert(file, xmpModifiedAt: nil) }
         }
         if let idx = filteredFiles.firstIndex(where: { $0.rawURL == rawURL }) {
-            filteredFiles[idx].locationId = locationId
-            filteredFiles[idx].locationPath = locationPath
+            mutation(&filteredFiles[idx])
         }
     }
 
@@ -504,8 +510,29 @@ struct ContentView: View {
                                 .font(.caption)
                                 .foregroundStyle(Color.accentColor)
                         }
+                        if vm.isIndexing {
+                            ProgressView().scaleEffect(0.55)
+                            Text(vm.indexStatus)
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        } else if !vm.indexStatus.isEmpty {
+                            Text(vm.indexStatus)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
                     }
                     Spacer()
+                    if let url = srcURL, !vm.isLoading {
+                        Button {
+                            vm.rescan(from: url, minRating: minRating)
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.borderless)
+                        .disabled(vm.isIndexing)
+                        .help("再スキャン")
+                    }
                     if !vm.filteredFiles.isEmpty {
                         Button {
                             selection = Set(vm.filteredFiles.map(\.id))
