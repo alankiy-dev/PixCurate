@@ -44,20 +44,55 @@ enum ThumbnailService {
     /// RAWファイルの埋め込みJPEGプレビューを優先して読み込む
     nonisolated private static func load(url: URL, maxPixel: Int) -> NSImage? {
         let srcOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
-        if let source = CGImageSourceCreateWithURL(url as CFURL, srcOptions as CFDictionary) {
-            let thumbOptions: [CFString: Any] = [
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, srcOptions as CFDictionary) else {
+            return NSImage(contentsOf: url).map { scaled($0, maxPixel: maxPixel) }
+        }
+
+        // Step 1: 埋め込みサムネイルのみを高速取得（フルRAW展開しない）
+        let quickOptions: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, quickOptions as CFDictionary) {
+            return NSImage(cgImage: cgImage, size: .zero)
+        }
+
+        // Step 2: RAF など複数サブイメージを持つ形式 → 全インデックスを探索
+        let count = CGImageSourceGetCount(source)
+        for i in 0..<count {
+            let opts: [CFString: Any] = [
+                kCGImageSourceThumbnailMaxPixelSize: maxPixel,
+                kCGImageSourceCreateThumbnailFromImageIfAbsent: false,
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, i, opts as CFDictionary) {
+                return NSImage(cgImage: cgImage, size: .zero)
+            }
+            // サムネイルAPIで取れなくてもサブイメージ自体が小さければ直接使う
+            let directOpts: [CFString: Any] = [kCGImageSourceShouldCache: false]
+            if let cgImage = CGImageSourceCreateImageAtIndex(source, i, directOpts as CFDictionary) {
+                let pixels = cgImage.width * cgImage.height
+                // 本体RAW（数千万画素）は除外し、プレビュー相当（2000万画素未満）のみ採用
+                if pixels > 0 && pixels < 20_000_000 {
+                    return NSImage(cgImage: cgImage, size: .zero)
+                }
+            }
+        }
+
+        // Step 3: 小ファイル（50MB未満）のみフルデコードへフォールバック
+        if let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           fileSize < 50_000_000 {
+            let fullOptions: [CFString: Any] = [
                 kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                 kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
                 kCGImageSourceCreateThumbnailWithTransform: true
             ]
-            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, thumbOptions as CFDictionary) {
+            if let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, fullOptions as CFDictionary) {
                 return NSImage(cgImage: cgImage, size: .zero)
             }
         }
 
-        if let image = NSImage(contentsOf: url) {
-            return scaled(image, maxPixel: maxPixel)
-        }
         return nil
     }
 
