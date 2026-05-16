@@ -19,10 +19,19 @@ private enum Keys {
     static let locationFilterExpanded   = "pixcurate.filter.location.expanded"
     static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
     static let presetExpanded           = "pixcurate.filter.preset.expanded"
+    static let fileTypeFilter           = "pixcurate.fileTypeFilter"
     static let folderExpanded           = "pixcurate.folder.expanded"
     static let filterExpanded           = "pixcurate.filter.section.expanded"
     static let collectionExpanded       = "pixcurate.collection.expanded"
     static let copyExpanded             = "pixcurate.copy.expanded"
+}
+
+// MARK: - FileTypeFilter
+
+enum FileTypeFilter: String, CaseIterable {
+    case rawOnly  = "RAWのみ"
+    case jpegOnly = "JPEGのみ"
+    case both     = "両方"
 }
 
 // MARK: - ViewModel
@@ -134,6 +143,7 @@ class FileListViewModel {
     var shotDateFrom: Date? = nil      // nilなら無効
     var shotDateTo: Date? = nil
     var xmpSinceFilter: Date? = nil   // nilなら無効
+    var fileTypeFilter: FileTypeFilter = .rawOnly
 
     // MARK: - Collection mode
     var isCollectionMode: Bool = false
@@ -219,6 +229,13 @@ class FileListViewModel {
     func applyFilter(minRating: Int) {
         let cal = Calendar.current
         filteredFiles = allFiles.filter { file in
+            let typeOK: Bool
+            switch fileTypeFilter {
+            case .rawOnly:  typeOK = !file.isJpeg
+            case .jpegOnly: typeOK = file.isJpeg
+            case .both:     typeOK = true
+            }
+            guard typeOK else { return false }
             let ratingOK = minRating == 0 || (file.rating ?? 0) >= minRating
             let tagOK = filterGroups.isEmpty || filterGroups.allSatisfy { group in
                 group.isEmpty || group.contains { file.tags.contains($0) }
@@ -353,6 +370,7 @@ struct ContentView: View {
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
     @State private var showRebuildConfirm = false  // メニュー「DB再構築…」から
+    @State private var fileTypeFilter: FileTypeFilter = FileTypeFilter(rawValue: UserDefaults.standard.string(forKey: Keys.fileTypeFilter) ?? "") ?? .rawOnly
     @State private var ratingFilterExpanded    = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)    as? Bool ?? true
     @State private var tagFilterExpanded       = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)       as? Bool ?? true
     @State private var locationFilterExpanded  = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded)  as? Bool ?? true
@@ -406,6 +424,7 @@ struct ContentView: View {
                 vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
                 vm.locationFilter = selectedLocationIds
                 vm.filterGroups = filterGroups.map { Array($0.tagNames) }
+                vm.fileTypeFilter = fileTypeFilter
                 vm.load(from: url, minRating: minRating)
             }
         }
@@ -494,6 +513,20 @@ struct ContentView: View {
 
                 Section {
                     if filterExpanded {
+                    // ファイルタイプ
+                    Picker("", selection: $fileTypeFilter) {
+                        ForEach(FileTypeFilter.allCases, id: \.self) { t in
+                            Text(t.rawValue).tag(t)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .padding(.vertical, 4)
+                    .onChange(of: fileTypeFilter) { _, v in
+                        UserDefaults.standard.set(v.rawValue, forKey: Keys.fileTypeFilter)
+                        vm.fileTypeFilter = v
+                        vm.applyFilter(minRating: minRating)
+                    }
+
                     // 評価
                     DisclosureGroup(isExpanded: $ratingFilterExpanded) {
                         StarPickerView(selection: $minRating)

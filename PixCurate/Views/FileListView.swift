@@ -283,7 +283,16 @@ struct PhotoCell: View {
                 // Overlay badges
                 VStack {
                     HStack {
-                        if settings.showLocation, let locId = file.locationId {
+                        if file.isJpeg {
+                            Text("JPEG")
+                                .font(.system(size: fontSize - 1, weight: .bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(Color(red: 0.15, green: 0.6, blue: 0.4).opacity(0.88))
+                                .clipShape(RoundedRectangle(cornerRadius: 3))
+                                .padding(5)
+                        } else if settings.showLocation, let locId = file.locationId {
                             let locName = locationStore.path(of: locId).last?.name ?? ""
                             HStack(spacing: 2) {
                                 Image(systemName: "mappin.circle.fill")

@@ -21,4 +21,8 @@ struct PhotoFile: Identifiable, Sendable {
     }
     nonisolated var filename: String { rawURL.lastPathComponent }
     nonisolated var fileExtension: String { rawURL.pathExtension.uppercased() }
+    nonisolated var isJpeg: Bool {
+        let ext = rawURL.pathExtension.lowercased()
+        return ext == "jpg" || ext == "jpeg"
+    }
 }

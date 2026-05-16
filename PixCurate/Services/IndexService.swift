@@ -32,7 +32,7 @@ enum IndexService {
         progress: @Sendable (Int, Int) -> Void = { _, _ in }
     ) -> (files: [PhotoFile], result: ScanResult) {
 
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3"]
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
         let fm = FileManager.default
         let locStore = LocationStore.shared
         var diskPaths = Set<String>()
@@ -125,7 +125,7 @@ enum IndexService {
         folder: URL,
         existing: inout [PhotoFile]
     ) -> ScanResult {
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3"]
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
         let fm = FileManager.default
         let locStore = LocationStore.shared
         var diskPaths = Set<String>()
