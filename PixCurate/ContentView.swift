@@ -867,7 +867,7 @@ struct ContentView: View {
 
     private func sectionHeader(_ title: String, color: Color = .secondary) -> some View {
         Text(title)
-            .font(.caption)
+            .font(.subheadline)
             .fontWeight(.bold)
             .textCase(nil)
             .foregroundStyle(color)
@@ -876,7 +876,7 @@ struct ContentView: View {
     private func collapsibleHeader(_ title: String, color: Color, expanded: Bool, toggle: @escaping () -> Void, key: String, trailing: (() -> AnyView)? = nil) -> some View {
         HStack(spacing: 4) {
             Text(title)
-                .font(.caption)
+                .font(.subheadline)
                 .fontWeight(.bold)
                 .textCase(nil)
                 .foregroundStyle(color)
@@ -886,12 +886,12 @@ struct ContentView: View {
                 toggle()
             } label: {
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(color.opacity(0.7))
             }
             .buttonStyle(.borderless)
         }
-        .padding(.vertical, 5)
+        .padding(.vertical, 6)
         .background(
             color.opacity(0.10)
                 .padding(.horizontal, -50)
@@ -901,7 +901,7 @@ struct ContentView: View {
     private func filterLabel(_ title: String, icon: String, color: Color) -> some View {
         Label {
             Text(title)
-                .font(.subheadline)
+                .font(.body)
                 .fontWeight(.semibold)
                 .foregroundStyle(.primary)
         } icon: {
@@ -1387,23 +1387,23 @@ struct FolderPickerRow: View {
     var body: some View {
         HStack(alignment: .top) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.caption2).foregroundStyle(.secondary)
+                Text(label).font(.callout).fontWeight(.medium).foregroundStyle(.secondary)
                 if let url {
                     Text(url.path)
                         .lineLimit(3)
                         .truncationMode(.middle)
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.primary)
                 } else {
                     Text("未選択")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                 }
             }
             Spacer()
             Button("選択") { pick() }
                 .buttonStyle(.borderless)
-                .font(.caption)
+                .font(.callout)
         }
     }
 

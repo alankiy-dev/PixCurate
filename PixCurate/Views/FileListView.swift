@@ -341,7 +341,7 @@ struct PhotoCell: View {
 
             if settings.showFilename {
                 Text(file.filename)
-                    .font(.caption2)
+                    .font(.caption)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(width: w)
@@ -350,7 +350,7 @@ struct PhotoCell: View {
 
             if settings.showShotDate, let date = file.shotDate {
                 Text(shotDateString(date))
-                    .font(.system(size: 9))
+                    .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                     .frame(width: w)
             }
