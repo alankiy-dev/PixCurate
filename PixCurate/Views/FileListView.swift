@@ -67,6 +67,7 @@ struct FileListView: View {
             }
             .padding(12)
         }
+        .applyGridBackground(settings.gridBackground)
         .onTapGesture { selection.removeAll() }
         .focusable()
         .onKeyPress(phases: .down) { handleKeyPress($0) }
@@ -111,6 +112,7 @@ struct FileListView: View {
             }
             .frame(minWidth: listContentMinWidth)
         }
+        .applyGridBackground(settings.gridBackground)
         .onTapGesture { selection.removeAll() }
         .focusable()
         .onKeyPress(phases: .down) { handleKeyPress($0) }
@@ -122,7 +124,10 @@ struct FileListView: View {
         //   ① Color.clear(thumbWidth) + ② Color.clear(thumbGap) + ③ filename(flex) + ④ 各列(固定幅)
         // 外側 padding も行と同じ rowHPad
         HStack(spacing: 0) {
-            Color.clear.frame(width: ListLayout.thumbWidth)   // ① thumb 幅
+            Text("画像")                                        // ① thumb 幅
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .frame(width: ListLayout.thumbWidth, alignment: .center)
             Color.clear.frame(width: ListLayout.thumbGap)     // ② gap 幅
 
             sortHeaderButton(label: "ファイル名", column: nil)
@@ -232,6 +237,22 @@ struct FileListView: View {
             selection = Set(files[range].map(\.id))
         } else {
             selection = [file.id]
+        }
+    }
+}
+
+// MARK: - Background color scheme helper
+
+private extension View {
+    @ViewBuilder
+    func applyGridBackground(_ bg: DisplaySettings.GridBackground) -> some View {
+        switch bg {
+        case .system:
+            self
+        case .white:
+            self.background(Color.white).colorScheme(.light)
+        case .black:
+            self.background(Color.black).colorScheme(.dark)
         }
     }
 }

@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 // MARK: - ListColumn
 
@@ -63,6 +64,24 @@ enum ListColumn: String, CaseIterable, Identifiable {
         case .resolution:   return 98
         }
     }
+
+    /// Excel 列幅（文字単位）
+    var xlsxWidth: Double {
+        switch self {
+        case .shotDate:     return 20
+        case .rating:       return 12
+        case .location:     return 18
+        case .tags:         return 22
+        case .xmpDate:      return 20
+        case .camera:       return 28
+        case .lens:         return 32
+        case .focalLength:  return 13
+        case .aperture:     return 8
+        case .shutterSpeed: return 10
+        case .iso:          return 7
+        case .resolution:   return 14
+        }
+    }
 }
 
 // MARK: - List layout constants (shared between header and row)
@@ -119,32 +138,50 @@ final class DisplaySettings {
     // MARK: - List view columns
     var listColumns: Set<ListColumn> = [.shotDate, .rating, .location, .tags]
 
+    // MARK: - Grid/List background color
+    enum GridBackground: String, CaseIterable {
+        case system = "自動"
+        case white  = "白"
+        case black  = "黒"
+
+        var colorScheme: ColorScheme? {
+            switch self {
+            case .system: return nil
+            case .white:  return .light
+            case .black:  return .dark
+            }
+        }
+    }
+    var gridBackground: GridBackground = .system
+
     // MARK: - Persistence
 
     private enum K {
-        static let showRating   = "ds.showRating"
-        static let showTags     = "ds.showTags"
-        static let showLocation = "ds.showLocation"
-        static let showFilename = "ds.showFilename"
-        static let showShotDate = "ds.showShotDate"
-        static let thumbSize    = "ds.thumbSize"
-        static let badgeFont    = "ds.badgeFont"
-        static let viewMode     = "ds.viewMode"
-        static let listColumns  = "ds.listColumns"
+        static let showRating      = "ds.showRating"
+        static let showTags        = "ds.showTags"
+        static let showLocation    = "ds.showLocation"
+        static let showFilename    = "ds.showFilename"
+        static let showShotDate    = "ds.showShotDate"
+        static let thumbSize       = "ds.thumbSize"
+        static let badgeFont       = "ds.badgeFont"
+        static let viewMode        = "ds.viewMode"
+        static let listColumns     = "ds.listColumns"
+        static let gridBackground  = "ds.gridBackground"
     }
 
     init() { load() }
 
     private func load() {
         let d = UserDefaults.standard
-        showRating   = d.object(forKey: K.showRating)   as? Bool ?? true
-        showTags     = d.object(forKey: K.showTags)     as? Bool ?? true
-        showLocation = d.object(forKey: K.showLocation) as? Bool ?? true
-        showFilename = d.object(forKey: K.showFilename) as? Bool ?? true
-        showShotDate = d.object(forKey: K.showShotDate) as? Bool ?? true
-        thumbSize    = ThumbSize(rawValue: d.string(forKey: K.thumbSize) ?? "") ?? .small
-        badgeFont    = BadgeFont(rawValue: d.string(forKey: K.badgeFont) ?? "") ?? .small
-        viewMode     = ViewMode(rawValue:  d.string(forKey: K.viewMode)  ?? "") ?? .grid
+        showRating      = d.object(forKey: K.showRating)   as? Bool ?? true
+        showTags        = d.object(forKey: K.showTags)     as? Bool ?? true
+        showLocation    = d.object(forKey: K.showLocation) as? Bool ?? true
+        showFilename    = d.object(forKey: K.showFilename) as? Bool ?? true
+        showShotDate    = d.object(forKey: K.showShotDate) as? Bool ?? true
+        thumbSize       = ThumbSize(rawValue: d.string(forKey: K.thumbSize) ?? "") ?? .small
+        badgeFont       = BadgeFont(rawValue: d.string(forKey: K.badgeFont) ?? "") ?? .small
+        viewMode        = ViewMode(rawValue:  d.string(forKey: K.viewMode)  ?? "") ?? .grid
+        gridBackground  = GridBackground(rawValue: d.string(forKey: K.gridBackground) ?? "") ?? .system
         if let str = d.string(forKey: K.listColumns) {
             listColumns = Set(str.split(separator: ",").compactMap { ListColumn(rawValue: String($0)) })
         }
@@ -152,14 +189,15 @@ final class DisplaySettings {
 
     func save() {
         let d = UserDefaults.standard
-        d.set(showRating,         forKey: K.showRating)
-        d.set(showTags,           forKey: K.showTags)
-        d.set(showLocation,       forKey: K.showLocation)
-        d.set(showFilename,       forKey: K.showFilename)
-        d.set(showShotDate,       forKey: K.showShotDate)
-        d.set(thumbSize.rawValue, forKey: K.thumbSize)
-        d.set(badgeFont.rawValue, forKey: K.badgeFont)
-        d.set(viewMode.rawValue,  forKey: K.viewMode)
+        d.set(showRating,              forKey: K.showRating)
+        d.set(showTags,                forKey: K.showTags)
+        d.set(showLocation,            forKey: K.showLocation)
+        d.set(showFilename,            forKey: K.showFilename)
+        d.set(showShotDate,            forKey: K.showShotDate)
+        d.set(thumbSize.rawValue,      forKey: K.thumbSize)
+        d.set(badgeFont.rawValue,      forKey: K.badgeFont)
+        d.set(viewMode.rawValue,       forKey: K.viewMode)
+        d.set(gridBackground.rawValue, forKey: K.gridBackground)
         d.set(listColumns.map(\.rawValue).joined(separator: ","), forKey: K.listColumns)
     }
 }

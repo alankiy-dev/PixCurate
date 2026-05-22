@@ -6,6 +6,7 @@ struct MasterSettingsView: View {
     @State private var newTagName = ""
     @State private var editingTag: Tag?
     @State private var editName = ""
+    @State private var deleteConfirmTag: Tag? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,7 +51,7 @@ struct MasterSettingsView: View {
                             }
                             .buttonStyle(.borderless)
                             Button {
-                                tagStore.removeTag(tag)
+                                deleteConfirmTag = tag
                             } label: {
                                 Image(systemName: "trash")
                                     .foregroundStyle(.red)
@@ -74,6 +75,22 @@ struct MasterSettingsView: View {
             .padding()
         }
         .frame(width: 380, height: 460)
+        .alert("タグを削除", isPresented: Binding(
+            get: { deleteConfirmTag != nil },
+            set: { if !$0 { deleteConfirmTag = nil } }
+        )) {
+            Button("キャンセル", role: .cancel) { deleteConfirmTag = nil }
+            Button("削除", role: .destructive) {
+                if let tag = deleteConfirmTag {
+                    tagStore.removeTag(tag)
+                    deleteConfirmTag = nil
+                }
+            }
+        } message: {
+            if let tag = deleteConfirmTag {
+                Text("タグ「\(tag.name)」を削除します。この操作は元に戻せません。")
+            }
+        }
         .sheet(item: $editingTag) { tag in
             editSheet(for: tag)
         }

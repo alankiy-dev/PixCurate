@@ -1,6 +1,17 @@
 import SwiftUI
 import Observation
 
+// MARK: - Helpers
+
+private extension Date {
+    var csvSuffix: String {
+        let f = DateFormatter()
+        f.dateFormat = "yyyyMMdd_HHmm"
+        return f.string(from: self)
+    }
+}
+
+
 // MARK: - UserDefaults keys
 
 private enum Keys {
@@ -20,10 +31,13 @@ private enum Keys {
     static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
     static let presetExpanded           = "pixcurate.filter.preset.expanded"
     static let fileTypeFilter           = "pixcurate.fileTypeFilter"
+    static let formatFilterExpanded     = "pixcurate.filter.format.expanded"
     static let folderExpanded           = "pixcurate.folder.expanded"
     static let filterExpanded           = "pixcurate.filter.section.expanded"
     static let collectionExpanded       = "pixcurate.collection.expanded"
     static let copyExpanded             = "pixcurate.copy.expanded"
+    static let gridWindowWidth          = "pixcurate.window.gridWidth"
+    static let listWindowWidth          = "pixcurate.window.listWidth"
 }
 
 // MARK: - FileTypeFilter
@@ -32,6 +46,28 @@ enum FileTypeFilter: String, CaseIterable {
     case rawOnly  = "RAWのみ"
     case jpegOnly = "JPEGのみ"
     case both     = "両方"
+
+    var shortLabel: String {
+        switch self {
+        case .rawOnly:  return "RAW"
+        case .jpegOnly: return "JPEG"
+        case .both:     return "両方"
+        }
+    }
+    var icon: String {
+        switch self {
+        case .rawOnly:  return "r.square"
+        case .jpegOnly: return "j.square"
+        case .both:     return "square.stack"
+        }
+    }
+    var iconFill: String {
+        switch self {
+        case .rawOnly:  return "r.square.fill"
+        case .jpegOnly: return "j.square.fill"
+        case .both:     return "square.stack.fill"
+        }
+    }
 }
 
 // MARK: - ViewModel
@@ -369,7 +405,9 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
-    @State private var showRebuildConfirm = false  // メニュー「DB再構築…」から
+    @State private var showRebuildConfirm = false        // メニュー「DB再構築…」から
+    @State private var deleteConfirmCollection: PhotoCollection? = nil
+    @State private var deleteConfirmPreset: FilterPreset?        = nil
     @State private var fileTypeFilter: FileTypeFilter = FileTypeFilter(rawValue: UserDefaults.standard.string(forKey: Keys.fileTypeFilter) ?? "") ?? .rawOnly
     @State private var ratingFilterExpanded    = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)    as? Bool ?? true
     @State private var tagFilterExpanded       = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)       as? Bool ?? true
@@ -382,7 +420,8 @@ struct ContentView: View {
     @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
     @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
         ?? Calendar.current.startOfDay(for: Date())
-    @State private var presetExpanded = UserDefaults.standard.object(forKey: Keys.presetExpanded) as? Bool ?? true
+    @State private var presetExpanded        = UserDefaults.standard.object(forKey: Keys.presetExpanded)        as? Bool ?? true
+    @State private var formatFilterExpanded  = UserDefaults.standard.object(forKey: Keys.formatFilterExpanded)  as? Bool ?? true
     @State private var activePresetId: UUID?
     @State private var showSavePreset = false
     @State private var presetName = ""
@@ -392,6 +431,9 @@ struct ContentView: View {
     @State private var filterExpanded     = UserDefaults.standard.object(forKey: Keys.filterExpanded)     as? Bool ?? true
     @State private var collectionExpanded = UserDefaults.standard.object(forKey: Keys.collectionExpanded) as? Bool ?? true
     @State private var copyExpanded       = UserDefaults.standard.object(forKey: Keys.copyExpanded)       as? Bool ?? true
+    // モード別ウィンドウ幅の記憶
+    @State private var savedGridWidth: CGFloat = UserDefaults.standard.object(forKey: Keys.gridWindowWidth) as? CGFloat ?? 1100
+    @State private var savedListWidth: CGFloat = UserDefaults.standard.object(forKey: Keys.listWindowWidth) as? CGFloat ?? 1500
     @State private var activeCollection: PhotoCollection?
     @State private var showNewCollection = false
     @State private var newCollectionName = ""
@@ -492,6 +534,42 @@ struct ContentView: View {
         } message: {
             Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
         }
+        .alert("コレクションを削除", isPresented: Binding(
+            get: { deleteConfirmCollection != nil },
+            set: { if !$0 { deleteConfirmCollection = nil } }
+        )) {
+            Button("キャンセル", role: .cancel) { deleteConfirmCollection = nil }
+            Button("削除", role: .destructive) {
+                if let col = deleteConfirmCollection {
+                    if activeCollection?.id == col.id {
+                        activeCollection = nil
+                        vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
+                    }
+                    collectionStore.delete(col)
+                    deleteConfirmCollection = nil
+                }
+            }
+        } message: {
+            if let col = deleteConfirmCollection {
+                Text("「\(col.name)」を削除します。この操作は元に戻せません。")
+            }
+        }
+        .alert("プリセットを削除", isPresented: Binding(
+            get: { deleteConfirmPreset != nil },
+            set: { if !$0 { deleteConfirmPreset = nil } }
+        )) {
+            Button("キャンセル", role: .cancel) { deleteConfirmPreset = nil }
+            Button("削除", role: .destructive) {
+                if let preset = deleteConfirmPreset {
+                    presetStore.delete(preset)
+                    deleteConfirmPreset = nil
+                }
+            }
+        } message: {
+            if let preset = deleteConfirmPreset {
+                Text("プリセット「\(preset.name)」を削除します。この操作は元に戻せません。")
+            }
+        }
     }
 
     // MARK: - Sidebar
@@ -502,7 +580,9 @@ struct ContentView: View {
                 Section {
                     if folderExpanded {
                         FolderPickerRow(label: "コピー元", url: $srcURL)
+                            .listRowInsets(SidebarLayout.rowInsets)
                         FolderPickerRow(label: "コピー先", url: $dstURL)
+                            .listRowInsets(SidebarLayout.rowInsets)
                     }
                 } header: {
                     collapsibleHeader("フォルダ", color: .blue, expanded: folderExpanded, toggle: {
@@ -513,27 +593,52 @@ struct ContentView: View {
 
                 Section {
                     if filterExpanded {
-                    // ファイルタイプ
-                    Picker("", selection: $fileTypeFilter) {
-                        ForEach(FileTypeFilter.allCases, id: \.self) { t in
-                            Text(t.rawValue).tag(t)
+                    // フォーマット
+                    DisclosureGroup(isExpanded: $formatFilterExpanded) {
+                        HStack(spacing: 0) {
+                            ForEach(FileTypeFilter.allCases, id: \.self) { t in
+                                let selected = fileTypeFilter == t
+                                Button {
+                                    fileTypeFilter = t
+                                    UserDefaults.standard.set(t.rawValue, forKey: Keys.fileTypeFilter)
+                                    vm.fileTypeFilter = t
+                                    vm.applyFilter(minRating: minRating)
+                                } label: {
+                                    VStack(spacing: 4) {
+                                        Image(systemName: selected ? t.iconFill : t.icon)
+                                            .font(.title2)
+                                        Text(t.shortLabel)
+                                            .font(.caption)
+                                            .fontWeight(selected ? .semibold : .regular)
+                                    }
+                                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 8)
+                                    .background(
+                                        RoundedRectangle(cornerRadius: 8)
+                                            .fill(selected ? Color.accentColor.opacity(0.12) : Color.clear)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
                         }
+                        .padding(.vertical, SidebarLayout.itemVPad)
+                    } label: {
+                        filterLabel("フォーマット", icon: "photo.stack", color: .cyan)
                     }
-                    .pickerStyle(.segmented)
-                    .padding(.vertical, 4)
-                    .onChange(of: fileTypeFilter) { _, v in
-                        UserDefaults.standard.set(v.rawValue, forKey: Keys.fileTypeFilter)
-                        vm.fileTypeFilter = v
-                        vm.applyFilter(minRating: minRating)
+                    .listRowInsets(SidebarLayout.rowInsets)
+                    .onChange(of: formatFilterExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.formatFilterExpanded)
                     }
 
                     // 評価
                     DisclosureGroup(isExpanded: $ratingFilterExpanded) {
                         StarPickerView(selection: $minRating)
-                            .padding(.vertical, 4)
+                            .padding(.vertical, 2)
                     } label: {
                         filterLabel("評価", icon: "star.fill", color: .yellow)
                     }
+                    .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: ratingFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.ratingFilterExpanded)
                     }
@@ -549,6 +654,7 @@ struct ContentView: View {
                         } label: {
                             filterLabel("タグ", icon: "tag.fill", color: .blue)
                         }
+                        .listRowInsets(SidebarLayout.rowInsets)
                         .onChange(of: tagFilterExpanded) { _, v in
                             UserDefaults.standard.set(v, forKey: Keys.tagFilterExpanded)
                         }
@@ -565,6 +671,7 @@ struct ContentView: View {
                         } label: {
                             filterLabel("撮影地", icon: "mappin.and.ellipse", color: .red)
                         }
+                        .listRowInsets(SidebarLayout.rowInsets)
                         .onChange(of: locationFilterExpanded) { _, v in
                             UserDefaults.standard.set(v, forKey: Keys.locationFilterExpanded)
                         }
@@ -572,7 +679,7 @@ struct ContentView: View {
 
                     // 撮影日
                     DisclosureGroup(isExpanded: $shotDateFilterExpanded) {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: SidebarLayout.contentSpacing) {
                             Toggle("撮影日フィルター", isOn: $useShotDateFilter)
                                 .font(.callout)
                                 .onChange(of: useShotDateFilter) { _, v in
@@ -582,9 +689,9 @@ struct ContentView: View {
                             if useShotDateFilter {
                                 HStack(spacing: 6) {
                                     Text("From")
-                                        .font(.caption)
+                                        .font(.callout)
                                         .foregroundStyle(.secondary)
-                                        .frame(width: 28, alignment: .leading)
+                                        .frame(width: 32, alignment: .leading)
                                     DatePicker("", selection: $shotDateFrom, displayedComponents: .date)
                                         .labelsHidden()
                                         .datePickerStyle(.compact)
@@ -595,9 +702,9 @@ struct ContentView: View {
                                 }
                                 HStack(spacing: 6) {
                                     Text("To")
-                                        .font(.caption)
+                                        .font(.callout)
                                         .foregroundStyle(.secondary)
-                                        .frame(width: 28, alignment: .leading)
+                                        .frame(width: 32, alignment: .leading)
                                     DatePicker("", selection: $shotDateTo, displayedComponents: .date)
                                         .labelsHidden()
                                         .datePickerStyle(.compact)
@@ -608,17 +715,18 @@ struct ContentView: View {
                                 }
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
                         filterLabel("撮影日", icon: "camera", color: .teal)
                     }
+                    .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: shotDateFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.shotDateFilterExpanded)
                     }
 
                     // XMP更新日
                     DisclosureGroup(isExpanded: $xmpFilterExpanded) {
-                        VStack(alignment: .leading, spacing: 6) {
+                        VStack(alignment: .leading, spacing: SidebarLayout.contentSpacing) {
                             Toggle("更新日フィルター", isOn: $useXmpSince)
                                 .font(.callout)
                                 .onChange(of: useXmpSince) { _, v in
@@ -626,7 +734,7 @@ struct ContentView: View {
                                     applyXmpFilter()
                                 }
                             if useXmpSince {
-                                HStack(spacing: 4) {
+                                HStack(spacing: SidebarLayout.itemHPad) {
                                     DatePicker("", selection: $xmpSinceDate, displayedComponents: .date)
                                         .labelsHidden()
                                         .datePickerStyle(.compact)
@@ -640,10 +748,11 @@ struct ContentView: View {
                                 }
                             }
                         }
-                        .padding(.vertical, 4)
+                        .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
                         filterLabel("更新日", icon: "calendar.badge.clock", color: .orange)
                     }
+                    .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: xmpFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.xmpFilterExpanded)
                     }
@@ -652,7 +761,7 @@ struct ContentView: View {
                     DisclosureGroup(isExpanded: $presetExpanded) {
                         if presetStore.presets.isEmpty {
                             Text("保存済みのプリセットはありません")
-                                .font(.caption)
+                                .font(.callout)
                                 .foregroundStyle(.secondary)
                         } else {
                             ForEach(presetStore.presets) { preset in
@@ -664,9 +773,9 @@ struct ContentView: View {
                                         HStack(spacing: 6) {
                                             Image(systemName: isActive
                                                   ? "checkmark.circle.fill"
-                                                  : "line.3.horizontal.decrease.circle")
+                                                  : "bookmark")
                                                 .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                                                .font(.caption)
+                                                .font(.callout)
                                             Text(preset.name)
                                                 .font(.callout)
                                                 .fontWeight(isActive ? .semibold : .regular)
@@ -680,20 +789,20 @@ struct ContentView: View {
                                         editingPreset = preset
                                     } label: {
                                         Image(systemName: "square.and.pencil")
-                                            .font(.caption)
+                                            .font(.callout)
                                     }
                                     .buttonStyle(.borderless)
                                     Button {
-                                        presetStore.delete(preset)
+                                        deleteConfirmPreset = preset
                                     } label: {
                                         Image(systemName: "trash")
-                                            .font(.caption)
+                                            .font(.callout)
                                             .foregroundStyle(.red)
                                     }
                                     .buttonStyle(.borderless)
                                 }
-                                .padding(.vertical, 3)
-                                .padding(.horizontal, 6)
+                                .padding(.vertical, SidebarLayout.itemVPad)
+                                .padding(.horizontal, SidebarLayout.itemHPad)
                                 .background(
                                     isActive
                                     ? Color.accentColor.opacity(0.15)
@@ -719,8 +828,9 @@ struct ContentView: View {
                             Text("現在の評価・タグ・撮影地フィルターを保存します")
                         }
                     } label: {
-                        sectionHeader("プリセット")
+                        filterLabel("プリセット", icon: "bookmark.fill", color: .indigo)
                     }
+                    .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: presetExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.presetExpanded)
                     }
@@ -734,6 +844,7 @@ struct ContentView: View {
 
                 Section {
                     collectionSection
+                        .listRowInsets(SidebarLayout.rowInsets)
                 } header: {
                     collapsibleHeader("コレクション", color: .purple, expanded: collectionExpanded, toggle: {
                         collectionExpanded.toggle()
@@ -756,10 +867,12 @@ struct ContentView: View {
                 Section {
                     if copyExpanded {
                         Toggle("フォルダ構造を維持", isOn: $keepStructure)
+                            .listRowInsets(SidebarLayout.rowInsets)
                             .onChange(of: keepStructure) { _, v in
                                 UserDefaults.standard.set(v, forKey: Keys.keepStructure)
                             }
                         copySection
+                            .listRowInsets(SidebarLayout.rowInsets)
                     }
                 } header: {
                     collapsibleHeader("コピー", color: .green, expanded: copyExpanded, toggle: {
@@ -802,7 +915,7 @@ struct ContentView: View {
         if collectionExpanded {
         if collectionStore.collections.isEmpty {
             Text("コレクションなし")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
             ForEach(collectionStore.collections) { col in
@@ -822,13 +935,13 @@ struct ContentView: View {
                                   ? "rectangle.stack.fill"
                                   : "rectangle.stack")
                                 .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                                .font(.caption)
+                                .font(.callout)
                             Text(col.name)
                                 .font(.callout)
                                 .fontWeight(isActive ? .semibold : .regular)
                             Spacer()
                             Text("\(col.fileCount)")
-                                .font(.caption2)
+                                .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
                         .contentShape(Rectangle())
@@ -839,25 +952,21 @@ struct ContentView: View {
                         editingCollection = col
                         editingCollectionName = col.name
                     } label: {
-                        Image(systemName: "square.and.pencil").font(.caption)
+                        Image(systemName: "square.and.pencil").font(.callout)
                     }
                     .buttonStyle(.borderless)
 
                     Button(role: .destructive) {
-                        if activeCollection?.id == col.id {
-                            activeCollection = nil
-                            vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
-                        }
-                        collectionStore.delete(col)
+                        deleteConfirmCollection = col
                     } label: {
                         Image(systemName: "trash")
-                            .font(.caption)
+                            .font(.callout)
                             .foregroundStyle(.red)
                     }
                     .buttonStyle(.borderless)
                 }
-                .padding(.vertical, 3)
-                .padding(.horizontal, 6)
+                .padding(.vertical, SidebarLayout.itemVPad)
+                .padding(.horizontal, SidebarLayout.itemHPad)
                 .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
                 .clipShape(RoundedRectangle(cornerRadius: 6))
             }
@@ -865,39 +974,45 @@ struct ContentView: View {
         }
     }
 
-    private func sectionHeader(_ title: String, color: Color = .secondary) -> some View {
-        Text(title)
-            .font(.subheadline)
-            .fontWeight(.bold)
-            .textCase(nil)
-            .foregroundStyle(color)
+    // MARK: - Sidebar layout constants
+
+    private enum SidebarLayout {
+        /// セクションヘッダー（フォルダ/フィルター等）の縦パディング
+        static let headerVPad:    CGFloat   = 3
+        /// 全 List 行の insets（上下対称）
+        static let rowInsets:     EdgeInsets = EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10)
+        /// アイテム行の内部縦パディング（プリセット・コレクション等）
+        static let itemVPad:      CGFloat   = 3
+        /// アイテム行の内部横パディング
+        static let itemHPad:      CGFloat   = 6
+        /// 展開コンテンツ内の VStack spacing
+        static let contentSpacing: CGFloat  = 6
     }
 
+    // MARK: - Sidebar helper views
+
+    /// レベル1：フォルダ/フィルター/コレクション/コピー
     private func collapsibleHeader(_ title: String, color: Color, expanded: Bool, toggle: @escaping () -> Void, key: String, trailing: (() -> AnyView)? = nil) -> some View {
         HStack(spacing: 4) {
             Text(title)
-                .font(.subheadline)
+                .font(.title3)
                 .fontWeight(.bold)
                 .textCase(nil)
                 .foregroundStyle(color)
             Spacer()
             if let trailing { trailing() }
-            Button {
-                toggle()
-            } label: {
+            Button { toggle() } label: {
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(color.opacity(0.7))
             }
             .buttonStyle(.borderless)
         }
-        .padding(.vertical, 6)
-        .background(
-            color.opacity(0.10)
-                .padding(.horizontal, -50)
-        )
+        .padding(.vertical, SidebarLayout.headerVPad)
+        .background(color.opacity(0.10).padding(.horizontal, -50))
     }
 
+    /// レベル2：評価/タグ/撮影地/撮影日/更新日/プリセット（DisclosureGroup ラベル）
     private func filterLabel(_ title: String, icon: String, color: Color) -> some View {
         Label {
             Text(title)
@@ -908,6 +1023,15 @@ struct ContentView: View {
             Image(systemName: icon)
                 .foregroundStyle(color)
         }
+    }
+
+    /// sectionHeader は filterLabel に統合済み（旧互換用・不使用）
+    private func sectionHeader(_ title: String, color: Color = .secondary) -> some View {
+        Text(title)
+            .font(.body)
+            .fontWeight(.semibold)
+            .textCase(nil)
+            .foregroundStyle(color)
     }
 
     private func applyTagFilter(clearPreset: Bool = true) {
@@ -1052,23 +1176,123 @@ struct ContentView: View {
         let sf = screen.visibleFrame
         var frame = window.frame
 
+        // 切り替え前のモードのウィンドウ幅を保存
         switch mode {
         case .list:
-            // 列幅の合計に合わせて横を広げる（画面幅を超えない）
-            let idealWidth: CGFloat = min(1500, sf.width)
-            frame.origin.x = max(sf.minX, frame.origin.x - (idealWidth - frame.width) / 2)
-            frame.size.width = idealWidth
-            // 画面からはみ出ないよう補正
-            if frame.maxX > sf.maxX { frame.origin.x = sf.maxX - frame.width }
+            savedGridWidth = frame.width
+            UserDefaults.standard.set(frame.width, forKey: Keys.gridWindowWidth)
         case .grid:
-            let idealWidth: CGFloat = 1100
-            frame.origin.x += (frame.width - idealWidth) / 2
-            frame.size.width = idealWidth
-            if frame.minX < sf.minX { frame.origin.x = sf.minX }
+            savedListWidth = frame.width
+            UserDefaults.standard.set(frame.width, forKey: Keys.listWindowWidth)
         }
+
+        // 切り替え先の幅を復元（画面幅でクランプ）
+        let targetWidth: CGFloat
+        switch mode {
+        case .list: targetWidth = min(savedListWidth, sf.width)
+        case .grid: targetWidth = min(savedGridWidth, sf.width)
+        }
+
+        frame.origin.x = max(sf.minX, frame.origin.x - (targetWidth - frame.width) / 2)
+        frame.size.width = targetWidth
+        if frame.maxX > sf.maxX { frame.origin.x = sf.maxX - frame.width }
+        if frame.minX < sf.minX { frame.origin.x = sf.minX }
 
         window.setFrame(frame, display: true, animate: true)
     }
+
+    // MARK: - Excel (xlsx) export
+
+    private func exportXLSX() {
+        let panel = NSSavePanel()
+        panel.title = "Excelファイルとして保存"
+        panel.nameFieldStringValue = "PixCurate_\(Date().csvSuffix).xlsx"
+        panel.allowedFileTypes = ["xlsx"]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let files      = vm.filteredFiles
+        let activeCols = ListColumn.allCases.filter { displaySettings.listColumns.contains($0) }
+        let needsEXIF  = activeCols.contains(where: \.needsEXIF)
+
+        var headers = ["ファイル名"]
+        headers += activeCols.map(\.label)
+
+        // Excel 列幅（ファイル名=30、各列は ListColumn.xlsxWidth）
+        var colWidths: [Double] = [30]
+        colWidths += activeCols.map(\.xlsxWidth)
+
+        Task.detached {
+            let dateFmt = DateFormatter()
+            dateFmt.locale = Locale(identifier: "ja_JP")
+            dateFmt.dateFormat = "yyyy/MM/dd HH:mm"
+
+            var rows: [[String]] = []
+
+            for file in files {
+                let exif: EXIFInfo? = needsEXIF ? EXIFService.readEXIFInfo(url: file.rawURL) : nil
+                var cols = [file.filename]
+
+                for col in activeCols {
+                    switch col {
+                    case .shotDate:
+                        cols.append(file.shotDate.map { dateFmt.string(from: $0) } ?? "")
+                    case .rating:
+                        cols.append(file.rating.map { String(repeating: "★", count: $0) } ?? "")
+                    case .location:
+                        let parts = [file.locationPath?.sublocation,
+                                     file.locationPath?.city,
+                                     file.locationPath?.province].compactMap { $0 }
+                        cols.append(parts.joined(separator: " / "))
+                    case .tags:
+                        // 複数タグは [タグ名] 形式で連結
+                        cols.append(file.tags.map { "[\($0)]" }.joined())
+                    case .xmpDate:
+                        cols.append(file.xmpModifiedAt.map { dateFmt.string(from: $0) } ?? "")
+                    case .camera:
+                        let parts = [exif?.cameraMake, exif?.cameraModel].compactMap { $0 }
+                        cols.append(parts.joined(separator: " "))
+                    case .lens:
+                        cols.append(exif?.lensModel ?? "")
+                    case .focalLength:
+                        cols.append(exif?.focalLength.map { "\(Int($0)) mm" } ?? "")
+                    case .aperture:
+                        cols.append(exif?.aperture.map { String(format: "f/%.1f", $0) } ?? "")
+                    case .shutterSpeed:
+                        if let ss = exif?.shutterSpeed {
+                            cols.append(ss >= 1
+                                ? String(format: "%.1f秒", ss)
+                                : "1/\(Int((1.0 / ss).rounded()))秒")
+                        } else { cols.append("") }
+                    case .iso:
+                        cols.append(exif?.iso.map { "\($0)" } ?? "")
+                    case .resolution:
+                        if let w = exif?.imageWidth, let h = exif?.imageHeight {
+                            cols.append("\(w) × \(h)")
+                        } else { cols.append("") }
+                    }
+                }
+                rows.append(cols)
+            }
+
+            // ── サムネイル収集（各ファイルを 120×90px JPEG に縮小）──────
+            var thumbnails: [XLSXThumbnail?] = []
+            for file in files {
+                if file.isOffline {
+                    thumbnails.append(nil)
+                } else if let nsImg = await ThumbnailService.thumbnail(for: file.rawURL) {
+                    thumbnails.append(xlsxResizedJPEG(nsImg))
+                } else {
+                    thumbnails.append(nil)
+                }
+            }
+
+            try? XLSXExporter.write(headers: headers, rows: rows,
+                                    columnWidths: colWidths,
+                                    thumbnails: thumbnails,
+                                    to: url)
+        }
+    }
+
 
     private func resetWindowState() {
         // 表示設定をデフォルトに戻す
@@ -1246,6 +1470,16 @@ struct ContentView: View {
                         .buttonStyle(.borderless)
                         .help("拡大表示")
                     }
+                    if !vm.filteredFiles.isEmpty {
+                        Button {
+                            exportXLSX()
+                        } label: {
+                            Image(systemName: "tablecells.badge.ellipsis")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("一覧をExcel（xlsx）に出力")
+                    }
                     Button {
                         showDisplaySettings.toggle()
                     } label: {
@@ -1401,9 +1635,12 @@ struct FolderPickerRow: View {
                 }
             }
             Spacer()
-            Button("選択") { pick() }
-                .buttonStyle(.borderless)
-                .font(.callout)
+            Button { pick() } label: {
+                Image(systemName: "folder.badge.plus")
+                    .font(.title3)
+            }
+            .buttonStyle(.bordered)
+            .tint(.accentColor)
         }
     }
 
@@ -1424,19 +1661,44 @@ struct StarPickerView: View {
 
     var body: some View {
         HStack(spacing: 2) {
-            Button("全") { selection = 0 }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .foregroundStyle(selection == 0 ? .primary : .secondary)
-
             ForEach(1...5, id: \.self) { star in
                 Image(systemName: star <= selection ? "star.fill" : "star")
                     .foregroundStyle(star <= selection ? Color.yellow : Color.secondary.opacity(0.4))
                     .font(.system(size: 14))
-                    .onTapGesture { selection = star }
+                    .onTapGesture {
+                        // タップで選択、同じ星を再度タップで1つ減らす
+                        selection = (selection == star) ? star - 1 : star
+                    }
             }
         }
     }
+}
+
+// MARK: - XLSX サムネイルヘルパー
+
+/// NSImage を maxW×maxH px（アスペクト比維持・縮小のみ）の XLSXThumbnail に変換する。
+/// CoreGraphics のみ使用 → バックグラウンドスレッドから安全に呼べる。
+private func xlsxResizedJPEG(_ image: NSImage, maxW: Int = 120, maxH: Int = 90) -> XLSXThumbnail? {
+    guard let cgSrc = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return nil }
+    let srcW = cgSrc.width, srcH = cgSrc.height
+    guard srcW > 0, srcH > 0 else { return nil }
+
+    // アスペクト比を保って縮小（拡大はしない）
+    let scale = min(Double(maxW) / Double(srcW), Double(maxH) / Double(srcH), 1.0)
+    let dstW  = max(1, Int(Double(srcW) * scale))
+    let dstH  = max(1, Int(Double(srcH) * scale))
+
+    let cs = CGColorSpaceCreateDeviceRGB()
+    guard let ctx = CGContext(data: nil, width: dstW, height: dstH,
+                              bitsPerComponent: 8, bytesPerRow: 0, space: cs,
+                              bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+    ctx.interpolationQuality = .medium
+    ctx.draw(cgSrc, in: CGRect(x: 0, y: 0, width: dstW, height: dstH))
+
+    guard let resized = ctx.makeImage() else { return nil }
+    let rep = NSBitmapImageRep(cgImage: resized)
+    guard let data = rep.representation(using: .jpeg, properties: [.compressionFactor: 0.75]) else { return nil }
+    return XLSXThumbnail(data: data, width: dstW, height: dstH)
 }
 
 // MARK: - Preview

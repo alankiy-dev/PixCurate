@@ -24,6 +24,18 @@ struct DisplaySettingsView: View {
 
             Divider()
 
+            // 背景色
+            Text("背景色").font(.caption).foregroundStyle(.secondary)
+            Picker("", selection: $s.gridBackground) {
+                ForEach(DisplaySettings.GridBackground.allCases, id: \.self) { bg in
+                    Text(bg.rawValue).tag(bg)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: s.gridBackground) { _, _ in s.save() }
+
+            Divider()
+
             if s.viewMode == .grid {
                 // グリッド設定
                 Text("サムネイルサイズ").font(.caption).foregroundStyle(.secondary)

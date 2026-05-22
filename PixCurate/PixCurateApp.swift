@@ -103,6 +103,19 @@ struct PixCurateApp: App {
                 .onReceive(NotificationCenter.default.publisher(for: .showHelp)) { _ in
                     showHelp = true
                 }
+                .task {
+                    // システムメニューを日本語化
+                    if let menu = NSApp.mainMenu {
+                        for item in menu.items {
+                            switch item.title {
+                            case "View":   item.title = "表示"
+                            case "Window": item.title = "ウインドウ"
+                            case "Help":   item.title = "ヘルプ"
+                            default: break
+                            }
+                        }
+                    }
+                }
         }
         .commands {
             PixCurateCommands(showAbout: $showAbout)

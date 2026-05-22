@@ -9,6 +9,7 @@ struct LocationMasterView: View {
     @State private var editName = ""
     @State private var newName = ""
     @State private var addingChildOf: UUID? = nil  // nil = root
+    @State private var deleteConfirmLocation: Location? = nil
 
     var body: some View {
         VStack(spacing: 0) {
@@ -84,6 +85,22 @@ struct LocationMasterView: View {
             .padding()
         }
         .frame(width: 460, height: 500)
+        .alert("撮影地を削除", isPresented: Binding(
+            get: { deleteConfirmLocation != nil },
+            set: { if !$0 { deleteConfirmLocation = nil } }
+        )) {
+            Button("キャンセル", role: .cancel) { deleteConfirmLocation = nil }
+            Button("削除", role: .destructive) {
+                if let loc = deleteConfirmLocation {
+                    store.removeLocation(loc)
+                    deleteConfirmLocation = nil
+                }
+            }
+        } message: {
+            if let loc = deleteConfirmLocation {
+                Text("撮影地「\(loc.name)」を削除します。この操作は元に戻せません。")
+            }
+        }
         .sheet(item: $editingLocation) { loc in
             editSheet(for: loc)
         }
@@ -125,7 +142,7 @@ struct LocationMasterView: View {
             }
             .buttonStyle(.borderless)
             Button {
-                store.removeLocation(loc)
+                deleteConfirmLocation = loc
             } label: {
                 Image(systemName: "trash").foregroundStyle(.red)
             }
