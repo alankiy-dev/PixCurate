@@ -19,7 +19,7 @@ struct TagFilterBuilderView: View {
             if filterGroups.isEmpty {
                 HStack {
                     Text("絞り込みなし")
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.secondary)
                     Spacer()
                     Button { addGroup() } label: {
@@ -38,7 +38,7 @@ struct TagFilterBuilderView: View {
                                 .fill(Color.secondary.opacity(0.35))
                                 .frame(height: 0.5)
                             Text("AND")
-                                .font(.system(size: 9, weight: .bold))
+                                .font(.system(size: 11, weight: .bold))
                                 .foregroundStyle(Color.orange)
                             Rectangle()
                                 .fill(Color.secondary.opacity(0.35))
@@ -60,12 +60,12 @@ struct TagFilterBuilderView: View {
                 HStack {
                     Button { addGroup() } label: {
                         Label("AND条件を追加", systemImage: "plus")
-                            .font(.caption)
+                            .font(.callout)
                     }
                     .buttonStyle(.borderless)
                     Spacer()
                     Button("クリア") { filterGroups = []; onChange() }
-                        .font(.caption)
+                        .font(.callout)
                         .foregroundStyle(.red)
                         .buttonStyle(.borderless)
                 }
@@ -119,7 +119,7 @@ struct FilterGroupRowView: View {
     private var groupLabel: some View {
         if tagNames.isEmpty {
             Text("タグを選択…")
-                .font(.caption)
+                .font(.callout)
                 .foregroundStyle(.secondary)
         } else {
             // Show chips with OR separator
@@ -128,11 +128,11 @@ struct FilterGroupRowView: View {
                 ForEach(Array(sorted.enumerated()), id: \.offset) { idx, name in
                     if idx > 0 {
                         Text("OR")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(.system(size: 10, weight: .bold))
                             .foregroundStyle(.secondary)
                     }
                     Text(name)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 12, weight: .medium))
                         .padding(.horizontal, 5)
                         .padding(.vertical, 2)
                         .background(Color.accentColor.opacity(0.2))
@@ -155,10 +155,10 @@ struct TagPickerPopoverView: View {
         VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("OR条件のタグを選択")
-                    .font(.caption)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                 Text("どれか1つ以上に一致する写真を表示")
-                    .font(.system(size: 10))
+                    .font(.system(size: 12))
                     .foregroundStyle(Color.secondary.opacity(0.8))
             }
             .padding(.horizontal, 12)

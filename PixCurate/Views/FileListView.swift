@@ -341,7 +341,7 @@ struct PhotoCell: View {
 
             if settings.showFilename {
                 Text(file.filename)
-                    .font(.caption)
+                    .font(.callout)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .frame(width: w)
