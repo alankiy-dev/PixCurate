@@ -1,6 +1,25 @@
 import SwiftUI
 import Observation
 
+// MARK: - WindowAccessor
+// NSViewRepresentable を使いウィンドウが確定したタイミングでコールバックを呼ぶ
+
+private struct WindowAccessor: NSViewRepresentable {
+    let callback: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let window = view.window {
+                self.callback(window)
+            }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+}
+
 // MARK: - Helpers
 
 private extension Date {
@@ -460,6 +479,9 @@ struct ContentView: View {
             columnVisibility = .all
             NotificationService.requestPermission()
         }
+        .background(WindowAccessor { window in
+            window.setFrameAutosaveName("PixCurateMain")
+        })
         .onChange(of: srcURL, initial: true) { _, newVal in
             BookmarkStore.save(url: newVal, key: Keys.srcPath)
             if let url = newVal {
