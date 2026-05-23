@@ -38,7 +38,7 @@ private enum Keys {
     static let dstPath                  = "pixcurate.dstPath"
     static let minRating                = "pixcurate.minRating"
     static let keepStructure            = "pixcurate.keepStructure"
-    static let useShotDateFilter        = "pixcurate.useShotDateFilter"
+    static let dateFilterMode           = "pixcurate.dateFilterMode"
     static let shotDateFrom             = "pixcurate.shotDateFrom"
     static let shotDateTo               = "pixcurate.shotDateTo"
     static let shotDateFilterExpanded   = "pixcurate.filter.shotdate.expanded"
@@ -57,6 +57,15 @@ private enum Keys {
     static let copyExpanded             = "pixcurate.copy.expanded"
     static let gridWindowWidth          = "pixcurate.window.gridWidth"
     static let listWindowWidth          = "pixcurate.window.listWidth"
+    static let annualFilterDays         = "pixcurate.annualFilterDays"
+}
+
+// MARK: - DateFilterMode
+
+enum DateFilterMode: String {
+    case off    = "off"     // 撮影日フィルターなし
+    case annual = "annual"  // 例年の今頃
+    case range  = "range"   // 期間指定（From/To）
 }
 
 // MARK: - FileTypeFilter
@@ -199,6 +208,7 @@ class FileListViewModel {
     var shotDateTo: Date? = nil
     var xmpSinceFilter: Date? = nil   // nilなら無効
     var fileTypeFilter: FileTypeFilter = .rawOnly
+    var annualFilterDays: Int? = nil   // nilなら無効。非nilのとき例年の今頃フィルターが有効
 
     // MARK: - Collection mode
     var isCollectionMode: Bool = false
@@ -297,7 +307,11 @@ class FileListViewModel {
             }
             let locationOK = locationFilter.isEmpty || (file.locationId.map { locationFilter.contains($0) } ?? false)
             let shotDateOK: Bool
-            if shotDateFrom != nil || shotDateTo != nil {
+            if let days = annualFilterDays {
+                // 例年の今頃フィルター：年をまたいで月日の近さで判定
+                guard let shot = file.shotDate else { return false }
+                shotDateOK = Self.isWithinAnnualRange(shot, days: days, cal: cal)
+            } else if shotDateFrom != nil || shotDateTo != nil {
                 guard let shot = file.shotDate else { return false }
                 let shotDay = cal.startOfDay(for: shot)
                 if let from = shotDateFrom, shotDay < cal.startOfDay(for: from) { return false }
@@ -316,6 +330,21 @@ class FileListViewModel {
             return ratingOK && tagOK && locationOK && shotDateOK && xmpOK
         }
         applyListSort()
+    }
+
+    /// 月日だけを見て「今日から±days日以内か」を判定（年をまたぐ場合も正しく処理）
+    private static func isWithinAnnualRange(_ date: Date, days: Int, cal: Calendar) -> Bool {
+        let today = Date()
+        let todayYear = cal.component(.year, from: today)
+        // 撮影日の月日を今年に当てはめた日付を生成
+        var comps = cal.dateComponents([.month, .day], from: date)
+        comps.year = todayYear
+        guard let normalized = cal.date(from: comps) else { return false }
+        let diff = abs(cal.dateComponents([.day], from: cal.startOfDay(for: normalized),
+                                                  to: cal.startOfDay(for: today)).day ?? Int.max)
+        // 年末年始をまたぐケース（例：今日1/5、撮影日12/28 → 差8日）
+        let yearLen = cal.range(of: .day, in: .year, for: today)?.count ?? 365
+        return min(diff, yearLen - diff) <= days
     }
 
     private func applyListSort() {
@@ -432,9 +461,10 @@ struct ContentView: View {
     @State private var tagFilterExpanded       = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)       as? Bool ?? true
     @State private var locationFilterExpanded  = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded)  as? Bool ?? true
     @State private var shotDateFilterExpanded  = UserDefaults.standard.object(forKey: Keys.shotDateFilterExpanded)  as? Bool ?? true
-    @State private var useShotDateFilter: Bool = UserDefaults.standard.bool(forKey: Keys.useShotDateFilter)
+    @State private var dateFilterMode: DateFilterMode = DateFilterMode(rawValue: UserDefaults.standard.string(forKey: Keys.dateFilterMode) ?? "") ?? .off
     @State private var shotDateFrom: Date      = UserDefaults.standard.object(forKey: Keys.shotDateFrom) as? Date ?? Calendar.current.date(byAdding: .month, value: -1, to: Date())!
     @State private var shotDateTo: Date        = UserDefaults.standard.object(forKey: Keys.shotDateTo)   as? Date ?? Date()
+    @State private var annualFilterDays: Int   = UserDefaults.standard.object(forKey: Keys.annualFilterDays) as? Int ?? 14
     @State private var xmpFilterExpanded       = UserDefaults.standard.object(forKey: Keys.xmpFilterExpanded)       as? Bool ?? true
     @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
     @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
@@ -489,6 +519,14 @@ struct ContentView: View {
                 vm.locationFilter = selectedLocationIds
                 vm.filterGroups = filterGroups.map { Array($0.tagNames) }
                 vm.fileTypeFilter = fileTypeFilter
+                switch dateFilterMode {
+                case .off:
+                    vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
+                case .annual:
+                    vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
+                case .range:
+                    vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
+                }
                 vm.load(from: url, minRating: minRating)
             }
         }
@@ -702,13 +740,65 @@ struct ContentView: View {
                     // 撮影日
                     DisclosureGroup(isExpanded: $shotDateFilterExpanded) {
                         VStack(alignment: .leading, spacing: SidebarLayout.contentSpacing) {
-                            Toggle("撮影日フィルター", isOn: $useShotDateFilter)
-                                .font(.callout)
-                                .onChange(of: useShotDateFilter) { _, v in
-                                    UserDefaults.standard.set(v, forKey: Keys.useShotDateFilter)
-                                    applyShotDateFilter()
+
+                            // ── モード切替（セグメント） ─────────────────
+                            HStack {
+                                Picker("", selection: $dateFilterMode) {
+                                    Image(systemName: "minus")
+                                        .help("フィルターなし")
+                                        .tag(DateFilterMode.off)
+                                    Image(systemName: "clock.arrow.circlepath")
+                                        .help("例年の今頃")
+                                        .tag(DateFilterMode.annual)
+                                    Image(systemName: "calendar")
+                                        .help("期間指定")
+                                        .tag(DateFilterMode.range)
                                 }
-                            if useShotDateFilter {
+                                .pickerStyle(.segmented)
+                                .fixedSize()
+                                Spacer()
+                            }
+                            .onChange(of: dateFilterMode) { _, v in
+                                UserDefaults.standard.set(v.rawValue, forKey: Keys.dateFilterMode)
+                                applyDateFilter()
+                            }
+
+                            // ── 例年の今頃パネル ─────────────────────────
+                            if dateFilterMode == .annual {
+                                HStack(spacing: 6) {
+                                    Text("前後")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                    TextField("", value: $annualFilterDays, format: .number)
+                                        .textFieldStyle(.roundedBorder)
+                                        .frame(width: 36)
+                                        .multilineTextAlignment(.trailing)
+                                        .onSubmit {
+                                            annualFilterDays = max(0, min(annualFilterDays, 99))
+                                            UserDefaults.standard.set(annualFilterDays, forKey: Keys.annualFilterDays)
+                                            applyDateFilter()
+                                        }
+                                    Text("日間")
+                                        .font(.callout)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button {
+                                        annualFilterDays = max(0, min(annualFilterDays, 99))
+                                        UserDefaults.standard.set(annualFilterDays, forKey: Keys.annualFilterDays)
+                                        applyDateFilter()
+                                    } label: {
+                                        Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                                            .font(.system(size: 20))
+                                            .foregroundStyle(Color.teal)
+                                            .symbolRenderingMode(.hierarchical)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("日数を適用して絞り込む（0〜99日）")
+                                }
+                            }
+
+                            // ── 期間指定パネル ───────────────────────────
+                            if dateFilterMode == .range {
                                 HStack(spacing: 6) {
                                     Text("From")
                                         .font(.callout)
@@ -719,7 +809,7 @@ struct ContentView: View {
                                         .datePickerStyle(.compact)
                                         .onChange(of: shotDateFrom) { _, v in
                                             UserDefaults.standard.set(v, forKey: Keys.shotDateFrom)
-                                            applyShotDateFilter()
+                                            applyDateFilter()
                                         }
                                 }
                                 HStack(spacing: 6) {
@@ -732,7 +822,7 @@ struct ContentView: View {
                                         .datePickerStyle(.compact)
                                         .onChange(of: shotDateTo) { _, v in
                                             UserDefaults.standard.set(v, forKey: Keys.shotDateTo)
-                                            applyShotDateFilter()
+                                            applyDateFilter()
                                         }
                                 }
                             }
@@ -1068,9 +1158,22 @@ struct ContentView: View {
         if clearPreset { activePresetId = nil }
     }
 
-    private func applyShotDateFilter() {
-        vm.shotDateFrom = useShotDateFilter ? shotDateFrom : nil
-        vm.shotDateTo   = useShotDateFilter ? shotDateTo   : nil
+    private func applyDateFilter() {
+        switch dateFilterMode {
+        case .off:
+            vm.annualFilterDays = nil
+            vm.shotDateFrom = nil
+            vm.shotDateTo   = nil
+        case .annual:
+            let days = max(0, min(annualFilterDays, 99))
+            vm.annualFilterDays = days
+            vm.shotDateFrom = nil
+            vm.shotDateTo   = nil
+        case .range:
+            vm.annualFilterDays = nil
+            vm.shotDateFrom = shotDateFrom
+            vm.shotDateTo   = shotDateTo
+        }
         vm.applyFilter(minRating: minRating)
     }
 
