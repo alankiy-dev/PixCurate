@@ -771,7 +771,7 @@ struct ContentView: View {
                                         .foregroundStyle(.secondary)
                                     TextField("", value: $annualFilterDays, format: .number)
                                         .textFieldStyle(.roundedBorder)
-                                        .frame(width: 36)
+                                        .frame(width: 48)
                                         .multilineTextAlignment(.trailing)
                                         .onSubmit {
                                             annualFilterDays = max(0, min(annualFilterDays, 99))
