@@ -217,6 +217,18 @@ struct FileListView: View {
             Divider()
             Button("評価を解除  0") { onRateSelected(nil) }
         }
+        Menu("カラーラベルを設定") {
+            ForEach(ColorLabel.allCases, id: \.self) { label in
+                Button {
+                    onColorLabelSelected(label)
+                } label: {
+                    Label(label.localizedName + "  \(label.keyChar.uppercased())",
+                          systemImage: "bookmark.fill")
+                }
+            }
+            Divider()
+            Button("解除  X") { onColorLabelSelected(nil) }
+        }
         Divider()
         // コレクション操作
         let targets = contextTargets(for: file)
@@ -373,9 +385,6 @@ struct PhotoCell: View {
                         .stroke(Color.accentColor, lineWidth: 3)
                         .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 0)
                         .frame(width: w, height: h)
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(Color.accentColor.opacity(0.15))
-                        .frame(width: w, height: h)
                 }
 
                 // Overlay badges
@@ -406,13 +415,14 @@ struct PhotoCell: View {
                             .padding(5)
                         }
                         Spacer()
-                        // カラーラベルドット（右上）
+                        // カラーラベルアイコン（右上）
                         if let label = file.colorLabel {
-                            Circle()
-                                .fill(label.color)
-                                .frame(width: fontSize + 4, height: fontSize + 4)
-                                .shadow(color: .black.opacity(0.5), radius: 2, x: 0, y: 1)
-                                .padding(5)
+                            Image(systemName: "bookmark.fill")
+                                .font(.system(size: fontSize + 3, weight: .bold))
+                                .foregroundStyle(label.color)
+                                .shadow(color: .black.opacity(0.55), radius: 2, x: 0, y: 1)
+                                .padding(.top, 3)
+                                .padding(.trailing, 4)
                         }
                     }
                     Spacer()

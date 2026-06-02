@@ -81,7 +81,7 @@ enum FileTypeFilter: String, CaseIterable {
         switch self {
         case .rawOnly:  return "RAW"
         case .jpegOnly: return "JPEG"
-        case .both:     return "両方"
+        case .both:     return "R & J"
         }
     }
     var icon: String {
@@ -695,7 +695,7 @@ struct ContentView: View {
                     if filterExpanded {
                     // フォーマット
                     DisclosureGroup(isExpanded: $formatFilterExpanded) {
-                        HStack(spacing: 0) {
+                        HStack(spacing: 6) {
                             ForEach(FileTypeFilter.allCases, id: \.self) { t in
                                 let selected = fileTypeFilter == t
                                 Button {
@@ -704,23 +704,19 @@ struct ContentView: View {
                                     vm.fileTypeFilter = t
                                     vm.applyFilter(minRating: minRating)
                                 } label: {
-                                    VStack(spacing: 4) {
-                                        Image(systemName: selected ? t.iconFill : t.icon)
-                                            .font(.title2)
-                                        Text(t.shortLabel)
-                                            .font(.caption)
-                                            .fontWeight(selected ? .semibold : .regular)
-                                    }
-                                    .foregroundStyle(selected ? Color.accentColor : Color.secondary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.vertical, 8)
-                                    .background(
-                                        RoundedRectangle(cornerRadius: 8)
-                                            .fill(selected ? Color.accentColor.opacity(0.12) : Color.clear)
-                                    )
+                                    Text(t.shortLabel)
+                                        .font(.system(size: 12, weight: selected ? .semibold : .regular))
+                                        .foregroundStyle(selected ? Color.accentColor : Color.secondary)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 5)
+                                        .background(
+                                            RoundedRectangle(cornerRadius: 6)
+                                                .fill(selected ? Color.accentColor.opacity(0.12) : Color.secondary.opacity(0.08))
+                                        )
                                 }
                                 .buttonStyle(.plain)
                             }
+                            Spacer()
                         }
                         .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
@@ -1135,24 +1131,6 @@ struct ContentView: View {
         DisclosureGroup(isExpanded: $colorLabelFilterExpanded) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
-                    // 全解除ボタン
-                    let noneSelected = selectedColorLabels.isEmpty
-                    Button {
-                        selectedColorLabels.removeAll()
-                        applyColorLabelFilter()
-                    } label: {
-                        ZStack {
-                            Circle()
-                                .stroke(noneSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 1.5)
-                                .frame(width: 24, height: 24)
-                            Image(systemName: "xmark")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(noneSelected ? Color.accentColor : Color.secondary.opacity(0.6))
-                        }
-                    }
-                    .buttonStyle(.plain)
-                    .help("すべて解除（全件表示）")
-
                     ForEach(ColorLabel.allCases, id: \.self) { label in
                         let isOn = selectedColorLabels.contains(label)
                         Button {
@@ -1163,19 +1141,16 @@ struct ContentView: View {
                             }
                             applyColorLabelFilter()
                         } label: {
-                            ZStack {
-                                Circle()
-                                    .fill(label.color)
-                                    .frame(width: 24, height: 24)
-                                if isOn {
-                                    Circle()
-                                        .stroke(Color.white, lineWidth: 2.5)
-                                        .frame(width: 24, height: 24)
-                                    Circle()
-                                        .stroke(label.color, lineWidth: 2)
-                                        .frame(width: 30, height: 30)
-                                }
-                            }
+                            Image(systemName: "bookmark.fill")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(label.color)
+                                .overlay(
+                                    isOn ? AnyView(
+                                        RoundedRectangle(cornerRadius: 2)
+                                            .stroke(label.color, lineWidth: 2)
+                                            .padding(-3)
+                                    ) : AnyView(EmptyView())
+                                )
                         }
                         .buttonStyle(.plain)
                         .help(label.localizedName + "（" + String(label.keyChar).uppercased() + "キー）")

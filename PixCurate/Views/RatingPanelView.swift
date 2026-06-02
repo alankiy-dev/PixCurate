@@ -4,8 +4,9 @@ struct RatingPanelView: View {
     let selectedFiles: [PhotoFile]
     let vm: FileListViewModel
 
-    @State private var pendingRating: Int? = nil
-    @State private var isWriting = false
+    @State private var isColorWriting = false
+
+    // MARK: - Rating state
 
     private var currentRating: Int? {
         guard !selectedFiles.isEmpty else { return nil }
@@ -14,14 +15,28 @@ struct RatingPanelView: View {
         return ratings.allSatisfy { $0 == first } ? first : nil
     }
 
-    private var displayRating: Int {
-        pendingRating ?? currentRating ?? 0
-    }
+    private var displayRating: Int { currentRating ?? 0 }
 
     private var isMixed: Bool {
-        guard pendingRating == nil else { return false }
+        guard selectedFiles.count > 1 else { return false }
         let ratings = selectedFiles.map { $0.rating }
         return ratings.dropFirst().contains { $0 != ratings.first }
+    }
+
+    // MARK: - Color label state
+
+    /// 選択中ファイルのカラーラベルが全て同一なら その値、混在なら nil
+    private var currentColorLabel: ColorLabel? {
+        guard !selectedFiles.isEmpty else { return nil }
+        let labels = selectedFiles.map { $0.colorLabel }
+        let first = labels[0]
+        return labels.allSatisfy { $0 == first } ? first : nil
+    }
+
+    private var isColorLabelMixed: Bool {
+        guard selectedFiles.count > 1 else { return false }
+        let labels = selectedFiles.map { $0.colorLabel }
+        return labels.dropFirst().contains { $0 != labels.first }
     }
 
     var body: some View {
@@ -54,95 +69,129 @@ struct RatingPanelView: View {
                 VStack(spacing: 20) {
                     Spacer()
 
-                    // 現在の評価表示
-                    if isMixed {
-                        Text("複数の評価が混在しています")
+                    // 星ピッカー（即時書き込み）
+                    VStack(spacing: 6) {
+                        Text("レーティング")
                             .font(.caption)
                             .foregroundStyle(.secondary)
-                    } else {
-                        Text(displayRating == 0 ? "未評価" : String(repeating: "★", count: displayRating))
-                            .font(.title2)
-                            .foregroundStyle(displayRating > 0 ? .yellow : .secondary)
-                    }
-
-                    // 星ピッカー
-                    VStack(spacing: 8) {
+                        if isMixed {
+                            Text("評価が混在しています")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
                         HStack(spacing: 8) {
                             ForEach(1...5, id: \.self) { star in
                                 Image(systemName: star <= displayRating ? "star.fill" : "star")
-                                    .font(.system(size: 28))
+                                    .font(.system(size: 22))
                                     .foregroundStyle(star <= displayRating ? .yellow : .secondary.opacity(0.4))
                                     .onTapGesture {
-                                        pendingRating = (pendingRating == star && star == displayRating) ? 0 : star
+                                        // 同じ星を再タップ → 解除
+                                        let newRating = (star == displayRating) ? 0 : star
+                                        applyRating(newRating)
                                     }
                                     .animation(.easeInOut(duration: 0.1), value: displayRating)
                             }
                         }
-
-                        Button("未評価に戻す") {
-                            pendingRating = 0
-                        }
-                        .font(.caption)
-                        .buttonStyle(.borderless)
-                        .foregroundStyle(.secondary)
                     }
 
-                    if let pending = pendingRating {
-                        Text(pending == 0 ? "未評価に変更 (未保存)" : "★\(pending) に変更 (未保存)")
-                            .font(.caption)
-                            .foregroundStyle(.orange)
-                    }
+                    Divider()
+
+                    // カラーラベルセクション
+                    colorLabelPicker
 
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
 
-                Divider()
-
-                // Write button
-                Group {
-                    if isWriting {
-                        HStack {
-                            ProgressView().scaleEffect(0.6)
-                            Text("書き込み中...").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Button { applyRating() } label: {
-                            Label("評価を書き込む", systemImage: "star.circle")
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .disabled(pendingRating == nil)
-                        .help(pendingRating == nil ? "星をタップして評価を選択してください" : "選択した\(selectedFiles.count)件に書き込む")
-                    }
-                }
-                .padding(10)
             }
         }
         .frame(width: 200)
         .background(Color(NSColor.windowBackgroundColor))
-        .onChange(of: selectedFiles.map { $0.id }) { _, _ in pendingRating = nil }
     }
 
-    private func applyRating() {
-        guard let rating = pendingRating else { return }
+    // MARK: - Color label picker
+
+    private var colorLabelPicker: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 4) {
+                Text("カラーラベル")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if isColorLabelMixed {
+                    Text("（混在）")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            // カラーボタン行
+            HStack(spacing: 10) {
+                ForEach(ColorLabel.allCases, id: \.self) { label in
+                    let isActive = !isColorLabelMixed && currentColorLabel == label
+                    Button {
+                        // 同じラベルを再クリック → 解除
+                        applyColorLabel(isActive ? nil : label)
+                    } label: {
+                        Image(systemName: "bookmark.fill")
+                            .font(.system(size: 20))
+                            .foregroundStyle(label.color)
+                            .overlay(
+                                isActive
+                                ? AnyView(
+                                    RoundedRectangle(cornerRadius: 2)
+                                        .stroke(label.color.opacity(0.7), lineWidth: 2)
+                                        .padding(-4)
+                                )
+                                : AnyView(EmptyView())
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .help(label.localizedName + "（" + String(label.keyChar).uppercased() + "キー）")
+                }
+            }
+            .padding(.horizontal, 12)
+
+            if isColorWriting {
+                HStack(spacing: 4) {
+                    ProgressView().scaleEffect(0.5)
+                    Text("書き込み中...").font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    private func applyRating(_ rating: Int) {
+        let newRating: Int? = rating == 0 ? nil : rating
         let files = selectedFiles
-        isWriting = true
+        Task.detached(priority: .userInitiated) {
+            for file in files {
+                _ = XMPService.writeRating(to: file.xmpURL, rating: rating)
+            }
+            let urls = files.map { $0.rawURL }
+            await MainActor.run {
+                for url in urls {
+                    vm.updateRating(for: url, rating: newRating)
+                }
+            }
+        }
+    }
+
+    private func applyColorLabel(_ label: ColorLabel?) {
+        let files = selectedFiles
+        isColorWriting = true
 
         Task.detached(priority: .userInitiated) {
-            var updates: [(URL, Int?)] = []
             for file in files {
-                let newRating = rating == 0 ? nil : rating
-                _ = XMPService.writeRating(to: file.xmpURL, rating: rating)
-                updates.append((file.rawURL, newRating))
+                _ = XMPService.writeColorLabel(to: file.xmpURL, label: label)
             }
-            let finalUpdates = updates
+            let urls = files.map { $0.rawURL }
             await MainActor.run {
-                for (url, r) in finalUpdates {
-                    vm.updateRating(for: url, rating: r)
+                for url in urls {
+                    vm.updateColorLabel(for: url, colorLabel: label)
                 }
-                pendingRating = nil
-                isWriting = false
+                isColorWriting = false
             }
         }
     }
