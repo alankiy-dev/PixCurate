@@ -91,7 +91,7 @@ struct PhotoListRow: View {
             Text(file.locationId.map { locationStore.path(of: $0).last?.name ?? "" } ?? "")
                 .lineLimit(1)
         case .tags:
-            Text(file.tags.prefix(2).joined(separator: "  ")).lineLimit(1)
+            Text(file.tags.joined(separator: "  ")).lineLimit(1)
         case .xmpDate:
             Text(file.xmpModifiedAt.map(formatDate) ?? "")
         case .camera:

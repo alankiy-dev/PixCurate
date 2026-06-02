@@ -5,6 +5,8 @@ extension Notification.Name {
     static let rebuildRequested   = Notification.Name("pixcurate.rebuild")
     static let resetWindowState   = Notification.Name("pixcurate.resetWindowState")
     static let showHelp           = Notification.Name("pixcurate.showHelp")
+    /// 拡大表示ウィンドウで評価を変更したとき。userInfo: ["url": URL, "rating": Int?]
+    static let photoRatingChanged = Notification.Name("pixcurate.photoRatingChanged")
 }
 
 // MARK: - App Commands

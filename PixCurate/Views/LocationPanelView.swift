@@ -10,6 +10,7 @@ struct LocationPanelView: View {
     @State private var hasPending = false
     @State private var isWriting = false
     @State private var showMaster = false
+    @State private var searchText = ""
 
     // What location is currently set on the selection
     private enum CurrentLocation: Equatable {
@@ -83,23 +84,74 @@ struct LocationPanelView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                // Location tree (radio-select)
+                // 検索フィールド
+                HStack(spacing: 6) {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                        .font(.caption)
+                    TextField("撮影地を検索", text: $searchText)
+                        .textFieldStyle(.plain)
+                        .font(.callout)
+                    if !searchText.isEmpty {
+                        Button { searchText = "" } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundStyle(.secondary)
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 6)
+                .background(Color.secondary.opacity(0.08))
+
+                Divider()
+
+                // Location tree or search results
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(store.children(of: nil)) { loc in
-                            LocationNodeRow(
-                                location: loc,
-                                store: store,
-                                selectedId: displayedId,
-                                isPending: hasPending,
-                                onSelect: { id in
-                                    pendingId = (pendingId == id && hasPending) ? nil : id
-                                    hasPending = pendingId != nil
+                    VStack(alignment: .leading, spacing: 0) {
+                        if searchText.isEmpty {
+                            // 通常ツリー表示
+                            ForEach(store.children(of: nil)) { loc in
+                                LocationNodeRow(
+                                    location: loc,
+                                    store: store,
+                                    selectedId: displayedId,
+                                    isPending: hasPending,
+                                    onSelect: { id in
+                                        pendingId = (pendingId == id && hasPending) ? nil : id
+                                        hasPending = pendingId != nil
+                                    }
+                                )
+                            }
+                        } else {
+                            // 検索結果をフラットに表示
+                            let results = store.locations.filter {
+                                $0.name.localizedCaseInsensitiveContains(searchText)
+                            }
+                            if results.isEmpty {
+                                Text("一致する撮影地がありません")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .padding(8)
+                            } else {
+                                ForEach(results) { loc in
+                                    LocationSearchRow(
+                                        location: loc,
+                                        store: store,
+                                        selectedId: displayedId,
+                                        isPending: hasPending,
+                                        onSelect: { id in
+                                            pendingId = (pendingId == id && hasPending) ? nil : id
+                                            hasPending = pendingId != nil
+                                        }
+                                    )
                                 }
-                            )
+                            }
                         }
                     }
-                    .padding(8)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
                 }
 
                 Divider()
@@ -176,20 +228,29 @@ struct LocationNodeRow: View {
             // Leaf — radio button
             leafRow
         } else {
-            // Branch — disclosure
-            DisclosureGroup(isExpanded: $isExpanded) {
-                ForEach(children) { child in
-                    LocationNodeRow(
-                        location: child,
-                        store: store,
-                        selectedId: selectedId,
-                        isPending: isPending,
-                        onSelect: onSelect
-                    )
-                    .padding(.leading, 14)
+            // Branch — custom disclosure (DisclosureGroupはデフォルト余白が大きいため自前実装)
+            VStack(alignment: .leading, spacing: 0) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.15)) { isExpanded.toggle() }
+                } label: {
+                    branchLabel
                 }
-            } label: {
-                branchLabel
+                .buttonStyle(.plain)
+
+                if isExpanded {
+                    VStack(alignment: .leading, spacing: 0) {
+                        ForEach(children) { child in
+                            LocationNodeRow(
+                                location: child,
+                                store: store,
+                                selectedId: selectedId,
+                                isPending: isPending,
+                                onSelect: onSelect
+                            )
+                            .padding(.leading, 14)
+                        }
+                    }
+                }
             }
         }
     }
@@ -209,7 +270,7 @@ struct LocationNodeRow: View {
         }
         .contentShape(Rectangle())
         .onTapGesture { onSelect(location.id) }
-        .padding(.vertical, 3)
+        .padding(.vertical, 0)
         .padding(.horizontal, 4)
         .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
         .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -217,7 +278,11 @@ struct LocationNodeRow: View {
 
     @ViewBuilder
     private var branchLabel: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 4) {
+            Image(systemName: isExpanded ? "chevron.down" : "chevron.right")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 9, weight: .semibold))
+                .frame(width: 10)
             Image(systemName: "mappin.circle")
                 .foregroundStyle(.secondary)
                 .font(.system(size: 12))
@@ -226,5 +291,46 @@ struct LocationNodeRow: View {
                 .foregroundStyle(.secondary)
             Spacer()
         }
+        .padding(.vertical, 1)
+        .padding(.horizontal, 4)
+    }
+}
+
+// MARK: - Search result row（パス付きフラット表示）
+
+struct LocationSearchRow: View {
+    let location: Location
+    let store: LocationStore
+    let selectedId: UUID?
+    let isPending: Bool
+    let onSelect: (UUID) -> Void
+
+    private var isSelected: Bool { selectedId == location.id }
+    private var pathLabel: String { store.pathString(of: location.id) }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: isSelected
+                  ? (isPending ? "largecircle.fill.circle" : "record.circle.fill")
+                  : "circle")
+                .foregroundStyle(isSelected ? Color.accentColor : .secondary)
+                .font(.system(size: 14))
+            VStack(alignment: .leading, spacing: 1) {
+                Text(location.name)
+                    .font(.callout)
+                    .foregroundStyle(isSelected ? Color.accentColor : .primary)
+                Text(pathLabel)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer()
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { onSelect(location.id) }
+        .padding(.vertical, 2)
+        .padding(.horizontal, 4)
+        .background(isSelected ? Color.accentColor.opacity(0.1) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 4))
     }
 }

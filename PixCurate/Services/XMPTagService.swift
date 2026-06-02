@@ -38,26 +38,39 @@ enum XMPTagService {
         guard var content = try? String(contentsOf: xmpURL, encoding: .utf8) else { return false }
         let newBlock = makeTagBlock(tags: tags)
 
-        // Replace existing dc:subject block
+        // 既存の dc:subject ブロックを全て削除する
+        // （空の <rdf:Bag/> 形式と通常の <rdf:Bag>...</rdf:Bag> 形式の両方に対応）
         if let regex = try? NSRegularExpression(
-            pattern: #"<dc:subject>\s*<rdf:Bag>.*?</rdf:Bag>\s*</dc:subject>"#,
+            pattern: #"<dc:subject>\s*(?:<rdf:Bag\s*/>|<rdf:Bag>.*?</rdf:Bag>)\s*</dc:subject>"#,
             options: [.dotMatchesLineSeparators]
         ) {
             let nsRange = NSRange(content.startIndex..., in: content)
-            if regex.firstMatch(in: content, range: nsRange) != nil {
-                content = regex.stringByReplacingMatches(in: content, range: nsRange, withTemplate: newBlock)
+            content = regex.stringByReplacingMatches(in: content, range: nsRange, withTemplate: "")
+        }
+
+        // </rdf:Description> の直前に新しいブロックを挿入
+        if let range = content.range(of: "</rdf:Description>") {
+            content = content.replacingCharacters(in: range,
+                                                  with: "   \(newBlock)\n  </rdf:Description>")
+            return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
+        }
+
+        // 自己閉じタグ <rdf:Description ... /> の場合（★評価のみ書かれた XMP で発生）
+        if let regex = try? NSRegularExpression(
+            pattern: #"<rdf:Description\b[^>]*/>"#,
+            options: .dotMatchesLineSeparators
+        ) {
+            let ns = NSRange(content.startIndex..., in: content)
+            if let match = regex.firstMatch(in: content, range: ns),
+               let range = Range(match.range, in: content) {
+                let originalTag = String(content[range])
+                let openTag     = String(originalTag.dropLast(2))
+                let replacement = "\(openTag)>\n   \(newBlock)\n  </rdf:Description>"
+                content = content.replacingCharacters(in: range, with: replacement)
                 return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
             }
         }
 
-        // Insert before </rdf:Description>
-        if content.contains("</rdf:Description>") {
-            content = content.replacingOccurrences(
-                of: "</rdf:Description>",
-                with: "  \(newBlock)\n  </rdf:Description>"
-            )
-            return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
-        }
         return false
     }
 

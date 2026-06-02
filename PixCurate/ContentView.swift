@@ -58,6 +58,8 @@ private enum Keys {
     static let gridWindowWidth          = "pixcurate.window.gridWidth"
     static let listWindowWidth          = "pixcurate.window.listWidth"
     static let annualFilterDays         = "pixcurate.annualFilterDays"
+    static let listSortColumn           = "pixcurate.listSortColumn"
+    static let listSortAscending        = "pixcurate.listSortAscending"
 }
 
 // MARK: - DateFilterMode
@@ -121,6 +123,7 @@ class FileListViewModel {
         allFiles = []
         filteredFiles = []
         indexStatus = ""
+        Task { await ThumbnailService.resetFailedURLs() }
 
         Task.detached {
             // 1. DBに既存データがあれば即ロード
@@ -166,6 +169,7 @@ class FileListViewModel {
         guard !isIndexing else { return }
         isIndexing = true
         indexStatus = "再スキャン中…"
+        Task { await ThumbnailService.resetFailedURLs() }
 
         Task.detached {
             let (files, result) = IndexService.fullScan(folder: url)
@@ -244,8 +248,24 @@ class FileListViewModel {
     }
 
     // MARK: - List sort
-    var listSortColumn: ListColumn? = nil   // nil = ファイル名
-    var listSortAscending: Bool = true
+    var listSortColumn: ListColumn? = {
+        guard let raw = UserDefaults.standard.string(forKey: Keys.listSortColumn) else { return nil }
+        return ListColumn(rawValue: raw)
+    }()
+    var listSortAscending: Bool = UserDefaults.standard.object(forKey: Keys.listSortAscending) as? Bool ?? true
+
+    private func saveSortState() {
+        UserDefaults.standard.set(listSortColumn?.rawValue, forKey: Keys.listSortColumn)
+        UserDefaults.standard.set(listSortAscending, forKey: Keys.listSortAscending)
+    }
+
+    /// グリッドのソートUIなど、列・方向を直接指定したいときに使う
+    func setSort(column: ListColumn?, ascending: Bool, minRating: Int) {
+        listSortColumn = column
+        listSortAscending = ascending
+        saveSortState()
+        applyFilter(minRating: minRating)
+    }
 
     func toggleListSort(column: ListColumn?, minRating: Int) {
         if listSortColumn == column {
@@ -259,6 +279,7 @@ class FileListViewModel {
             listSortColumn = column
             listSortAscending = true
         }
+        saveSortState()
         applyFilter(minRating: minRating)
     }
 
@@ -546,6 +567,11 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .resetWindowState)) { _ in
             resetWindowState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .photoRatingChanged)) { note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            let rating = note.userInfo?["rating"] as? Int
+            vm.updateRating(for: url, rating: rating)
         }
         .onChange(of: displaySettings.viewMode) { _, newMode in
             resizeWindowForMode(newMode)
@@ -1419,6 +1445,18 @@ struct ContentView: View {
     }
 
 
+    private func gridSortLabel(_ col: ListColumn?) -> String {
+        switch col {
+        case nil:       return "ファイル名"
+        case .shotDate: return "撮影日時"
+        case .rating:   return "評価"
+        case .location: return "撮影地"
+        case .tags:     return "タグ"
+        case .xmpDate:  return "XMP更新日"
+        default:        return "ファイル名"
+        }
+    }
+
     private func resetWindowState() {
         // 表示設定をデフォルトに戻す
         displaySettings.viewMode    = .grid
@@ -1538,6 +1576,58 @@ struct ContentView: View {
                                 .foregroundStyle(.tertiary)
                         }
                     }
+                    // グリッドモード時のみソートコントロールを表示
+                    if displaySettings.viewMode == .grid && !vm.filteredFiles.isEmpty {
+                        Divider().frame(height: 14)
+
+                        Menu {
+                            ForEach([
+                                (ListColumn?.none,   "ファイル名"),
+                                (.some(.shotDate),   "撮影日時"),
+                                (.some(.rating),     "評価"),
+                                (.some(.location),   "撮影地"),
+                                (.some(.tags),       "タグ"),
+                                (.some(.xmpDate),    "XMP更新日"),
+                            ] as [(ListColumn?, String)], id: \.1) { col, label in
+                                Button {
+                                    vm.setSort(column: col, ascending: vm.listSortAscending,
+                                               minRating: minRating)
+                                } label: {
+                                    if vm.listSortColumn == col {
+                                        Label(label, systemImage: "checkmark")
+                                    } else {
+                                        Text(label)
+                                    }
+                                }
+                            }
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "arrow.up.arrow.down")
+                                    .font(.system(size: 10))
+                                Text(gridSortLabel(vm.listSortColumn))
+                                    .font(.caption)
+                                Image(systemName: "chevron.down")
+                                    .font(.system(size: 8))
+                            }
+                            .foregroundStyle(.primary)
+                        }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("並び順を変更")
+
+                        Button {
+                            vm.setSort(column: vm.listSortColumn,
+                                       ascending: !vm.listSortAscending,
+                                       minRating: minRating)
+                        } label: {
+                            Image(systemName: vm.listSortAscending ? "arrow.up" : "arrow.down")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .buttonStyle(.borderless)
+                        .help(vm.listSortAscending ? "昇順" : "降順")
+                    }
+
                     Spacer()
                     if let col = activeCollection, !vm.isLoading {
                         Button {

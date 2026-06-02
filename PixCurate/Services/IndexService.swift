@@ -13,6 +13,13 @@ enum IndexService {
 
     // MARK: - DBから即ロード
 
+    /// 拡大表示ウィンドウ用：指定URLファイルの評価をXMPから読み込む
+    nonisolated static func loadRating(for rawURL: URL) -> Int? {
+        let xmpURL = rawURL.deletingPathExtension().appendingPathExtension("xmp")
+        let r = XMPService.readRating(xmpURL: xmpURL)
+        return r == 0 ? nil : r
+    }
+
     nonisolated static func loadFromDB(folder: URL) -> [PhotoFile] {
         let rows = DatabaseService.shared.loadFiles(under: folder)
         let locStore = LocationStore.shared

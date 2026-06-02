@@ -10,6 +10,7 @@ struct LocationMasterView: View {
     @State private var newName = ""
     @State private var addingChildOf: UUID? = nil  // nil = root
     @State private var deleteConfirmLocation: Location? = nil
+    @State private var showDuplicateAlert = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -101,6 +102,11 @@ struct LocationMasterView: View {
                 Text("撮影地「\(loc.name)」を削除します。この操作は元に戻せません。")
             }
         }
+        .alert("同名の撮影地があります", isPresented: $showDuplicateAlert) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text("同じ階層に「\(newName.trimmingCharacters(in: .whitespaces))」はすでに登録されています。")
+        }
         .sheet(item: $editingLocation) { loc in
             editSheet(for: loc)
         }
@@ -172,6 +178,10 @@ struct LocationMasterView: View {
     }
 
     private func addLocation() {
+        if store.isDuplicate(name: newName, parentId: addingChildOf) {
+            showDuplicateAlert = true
+            return
+        }
         store.addLocation(name: newName, parentId: addingChildOf)
         newName = ""
     }

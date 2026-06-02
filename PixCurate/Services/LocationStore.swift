@@ -21,8 +21,23 @@ final class LocationStore {
     func addLocation(name: String, parentId: UUID? = nil) {
         let trimmed = name.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { return }
+        // 同じ親の直下に同名の撮影地がある場合は追加しない
+        let duplicate = locations.contains {
+            $0.parentId == parentId &&
+            $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+        }
+        guard !duplicate else { return }
         locations.append(Location(name: trimmed, parentId: parentId))
         save()
+    }
+
+    /// 指定した parentId の直下に同名の撮影地が存在するか確認する
+    func isDuplicate(name: String, parentId: UUID?) -> Bool {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        return locations.contains {
+            $0.parentId == parentId &&
+            $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
+        }
     }
 
     func removeLocation(_ location: Location) {

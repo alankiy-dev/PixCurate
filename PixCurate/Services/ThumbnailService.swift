@@ -5,19 +5,30 @@ enum ThumbnailService {
     // MainActor上でキャッシュ管理
     @MainActor private static var cache: [URL: NSImage] = [:]
     @MainActor private static var fullCache: [URL: NSImage] = [:]
+    /// 取得を試みて失敗したURL。再レンダリングのたびに何度もエラーログが出るのを防ぐ
+    @MainActor private static var failedURLs: Set<URL> = []
 
     // 常に大サイズで生成してキャッシュ。縮小表示は SwiftUI に任せる
     private static let fixedMaxPixel = 600
 
     static func thumbnail(for url: URL, maxPixel: Int = 320) async -> NSImage? {
+        // キャッシュヒット
         if let cached = await MainActor.run(body: { cache[url] }) {
             return cached
         }
+        // 過去に失敗済みのURLは再試行しない
+        let alreadyFailed = await MainActor.run { failedURLs.contains(url) }
+        if alreadyFailed { return nil }
+
         let image = await Task.detached(priority: .userInitiated) {
             Self.load(url: url, maxPixel: Self.fixedMaxPixel)
         }.value
-        if let image {
-            await MainActor.run { cache[url] = image }
+        await MainActor.run {
+            if let image {
+                cache[url] = image
+            } else {
+                failedURLs.insert(url)   // 失敗を記録して次回はスキップ
+            }
         }
         return image
     }
@@ -33,6 +44,11 @@ enum ThumbnailService {
             await MainActor.run { fullCache[url] = image }
         }
         return image
+    }
+
+    /// 再スキャン・フォルダ切り替え時に失敗キャッシュをリセットして再試行を許可する
+    @MainActor static func resetFailedURLs() {
+        failedURLs.removeAll()
     }
 
     // MARK: - Thumbnail load
@@ -128,34 +144,67 @@ enum ThumbnailService {
     // MARK: - Full preview
 
     nonisolated private static func loadFullPreview(url: URL) -> NSImage? {
+        // RAF: ヘッダーから埋め込みJPEGをフル読み込み（NSImageがEXIF向きを自動適用）
+        if url.pathExtension.uppercased() == "RAF",
+           let img = loadRAFFullPreview(url: url) {
+            return img
+        }
+
         let srcOptions: [CFString: Any] = [kCGImageSourceShouldCache: false]
         guard let source = CGImageSourceCreateWithURL(url as CFURL,
                                                       srcOptions as CFDictionary) else {
             return NSImage(contentsOf: url)
         }
 
+        // FromImageIfAbsent = 埋め込みプレビュー優先（RAWフルデコードしない）
+        // WithTransform = EXIF向きを適用して縦画像を正しく表示
+        let thumbOpts: [CFString: Any] = [
+            kCGImageSourceThumbnailMaxPixelSize: 8000,
+            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCache: false
+        ]
         let count = CGImageSourceGetCount(source)
         var bestImage: CGImage?
         var bestPixels = 0
         for i in 0..<count {
-            let opts: [CFString: Any] = [kCGImageSourceShouldCache: false]
-            if let cgImg = CGImageSourceCreateImageAtIndex(source, i, opts as CFDictionary) {
+            if let cgImg = CGImageSourceCreateThumbnailAtIndex(source, i,
+                                                               thumbOpts as CFDictionary) {
                 let pixels = cgImg.width * cgImg.height
                 if pixels > bestPixels { bestPixels = pixels; bestImage = cgImg }
             }
         }
         if let cgImg = bestImage { return NSImage(cgImage: cgImg, size: .zero) }
 
-        let thumbOptions: [CFString: Any] = [
-            kCGImageSourceThumbnailMaxPixelSize: 8000,
-            kCGImageSourceCreateThumbnailFromImageIfAbsent: true,
-            kCGImageSourceCreateThumbnailWithTransform: true
-        ]
-        if let cgImg = CGImageSourceCreateThumbnailAtIndex(source, 0,
-                                                           thumbOptions as CFDictionary) {
-            return NSImage(cgImage: cgImg, size: .zero)
-        }
         return NSImage(contentsOf: url)
+    }
+
+    /// RAF ヘッダーから埋め込み JPEG をフルサイズで読み込む
+    nonisolated private static func loadRAFFullPreview(url: URL) -> NSImage? {
+        guard let fh = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? fh.close() }
+
+        guard let header = try? fh.read(upToCount: 92),
+              header.count >= 92 else { return nil }
+
+        let magic = Array("FUJIFILMCCD-RAW ".utf8)
+        guard header.prefix(16).elementsEqual(magic) else { return nil }
+
+        // オフセット 84-87: JPEG開始位置、88-91: JPEGサイズ（ビッグエンディアン）
+        let jpegOffset = Int(header[84]) << 24 | Int(header[85]) << 16
+                       | Int(header[86]) << 8  | Int(header[87])
+        let jpegLength = Int(header[88]) << 24 | Int(header[89]) << 16
+                       | Int(header[90]) << 8  | Int(header[91])
+
+        guard jpegOffset > 92, jpegLength > 3 else { return nil }
+
+        try? fh.seek(toOffset: UInt64(jpegOffset))
+        guard let jpegData = try? fh.read(upToCount: jpegLength),
+              jpegData.count > 3,
+              jpegData[0] == 0xFF, jpegData[1] == 0xD8 else { return nil }
+
+        // NSImage(data:) は JPEG の EXIF 向きを自動適用する
+        return NSImage(data: jpegData)
     }
 
     // MARK: - Scale

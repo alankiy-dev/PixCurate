@@ -20,9 +20,12 @@ enum BookmarkStore {
     nonisolated static func restore(_ key: String) -> URL? {
         guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
         var stale = false
+        // .withoutUI を指定することで、ネットワークドライブ未接続時に
+        // macOS がシステムダイアログを出してアプリ起動を妨げるのを防ぐ。
+        // 解決できない場合は nil を返し、アプリは正常起動する。
         let url = try? URL(
             resolvingBookmarkData: data,
-            options: .withSecurityScope,
+            options: [.withSecurityScope, .withoutUI],
             relativeTo: nil,
             bookmarkDataIsStale: &stale
         )

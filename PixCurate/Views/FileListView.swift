@@ -20,6 +20,7 @@ struct FileListView: View {
     @Environment(DisplaySettings.self) var settings
     @Environment(\.openWindow) var openWindow
     @State private var exifTarget: PhotoFile?
+    @State private var gridColumnCount: Int = 4   // 矢印キー移動用・幅測定で随時更新
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: settings.thumbSize.width,
@@ -52,26 +53,51 @@ struct FileListView: View {
     // MARK: - Grid
 
     private var gridView: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, spacing: settings.thumbSize.spacing) {
-                ForEach(files) { file in
-                    PhotoCell(file: file, isSelected: selection.contains(file.id))
-                        .onTapGesture(count: 2) {
-                            openWindow(id: "photo-viewer", value: file.rawURL)
-                        }
-                        .onTapGesture {
-                            handleTap(file)
-                        }
-                        .contextMenu { cellContextMenu(for: file) }
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVGrid(columns: columns, spacing: settings.thumbSize.spacing) {
+                    ForEach(files) { file in
+                        PhotoCell(file: file, isSelected: selection.contains(file.id))
+                            .id(file.id)
+                            .onTapGesture(count: 2) {
+                                selection = [file.id]
+                                openWindow(id: "photo-viewer", value: file.rawURL)
+                            }
+                            .onTapGesture {
+                                handleTap(file)
+                            }
+                            .contextMenu { cellContextMenu(for: file) }
+                    }
+                }
+                .padding(12)
+            }
+            .applyGridBackground(settings.gridBackground)
+            .background(GeometryReader { geo in
+                Color.clear
+                    .onAppear { updateGridColumnCount(width: geo.size.width) }
+                    .onChange(of: geo.size.width) { _, w in updateGridColumnCount(width: w) }
+            })
+            .onTapGesture { selection.removeAll() }
+            .focusable()
+            .onKeyPress(phases: .down) { handleKeyPress($0) }
+            .onChange(of: selection) { _, newSel in
+                // キーボード移動時のみスクロール追従（単一選択かつ矢印操作の結果）
+                if newSel.count == 1, let id = newSel.first {
+                    withAnimation(.easeInOut(duration: 0.15)) {
+                        proxy.scrollTo(id, anchor: .center)
+                    }
                 }
             }
-            .padding(12)
         }
-        .applyGridBackground(settings.gridBackground)
-        .onTapGesture { selection.removeAll() }
-        .focusable()
-        .onKeyPress(phases: .down) { handleKeyPress($0) }
         .sheet(item: $exifTarget) { ExifInfoSheet(file: $0) }
+    }
+
+    private func updateGridColumnCount(width: CGFloat) {
+        let spacing = settings.thumbSize.spacing
+        let minWidth = settings.thumbSize.width
+        // padding(12) が両端にあるので内側幅 = width - 24
+        let inner = max(minWidth, width - 24)
+        gridColumnCount = max(1, Int((inner + spacing) / (minWidth + spacing)))
     }
 
     // MARK: - List
@@ -213,11 +239,42 @@ struct FileListView: View {
     // MARK: - Key press
 
     private func handleKeyPress(_ press: KeyPress) -> KeyPress.Result {
-        guard !selection.isEmpty,
-              let ch = press.characters.first,
-              let digit = ch.wholeNumberValue,
-              (0...5).contains(digit) else { return .ignored }
-        onRateSelected(digit == 0 ? nil : digit)
+        // 数字キー 0〜5: 評価設定
+        if !selection.isEmpty,
+           let ch = press.characters.first,
+           let digit = ch.wholeNumberValue,
+           (0...5).contains(digit) {
+            onRateSelected(digit == 0 ? nil : digit)
+            return .handled
+        }
+
+        // 矢印キー: グリッドモードのみ
+        if settings.viewMode == .grid {
+            switch press.key {
+            case .leftArrow:  return moveGridSelection(by: -1)
+            case .rightArrow: return moveGridSelection(by: +1)
+            case .upArrow:    return moveGridSelection(by: -gridColumnCount)
+            case .downArrow:  return moveGridSelection(by: +gridColumnCount)
+            default: break
+            }
+        }
+
+        return .ignored
+    }
+
+    private func moveGridSelection(by delta: Int) -> KeyPress.Result {
+        guard !files.isEmpty else { return .ignored }
+
+        // 未選択なら先頭 or 末尾を選択
+        guard let currentId = selection.first,
+              let currentIdx = files.firstIndex(where: { $0.id == currentId }) else {
+            selection = [delta >= 0 ? files.first!.id : files.last!.id]
+            return .handled
+        }
+
+        let newIdx = max(0, min(files.count - 1, currentIdx + delta))
+        guard newIdx != currentIdx else { return .handled }
+        selection = [files[newIdx].id]
         return .handled
     }
 
@@ -283,9 +340,8 @@ struct PhotoCell: View {
                 } else if let thumb = thumbnail {
                     Image(nsImage: thumb)
                         .resizable()
-                        .aspectRatio(contentMode: .fill)
+                        .aspectRatio(contentMode: .fit)
                         .frame(width: w, height: h)
-                        .clipped()
                         .clipShape(RoundedRectangle(cornerRadius: 6))
                 } else {
                     ProgressView()
@@ -333,7 +389,7 @@ struct PhotoCell: View {
                     Spacer()
                     HStack(alignment: .bottom) {
                         if settings.showTags, !file.tags.isEmpty {
-                            Text(file.tags.prefix(2).joined(separator: " "))
+                            Text(file.tags.joined(separator: " "))
                                 .font(.system(size: fontSize, weight: .medium))
                                 .foregroundStyle(.white)
                                 .lineLimit(1)
