@@ -6,7 +6,9 @@ extension Notification.Name {
     static let resetWindowState   = Notification.Name("pixcurate.resetWindowState")
     static let showHelp           = Notification.Name("pixcurate.showHelp")
     /// 拡大表示ウィンドウで評価を変更したとき。userInfo: ["url": URL, "rating": Int?]
-    static let photoRatingChanged = Notification.Name("pixcurate.photoRatingChanged")
+    static let photoRatingChanged      = Notification.Name("pixcurate.photoRatingChanged")
+    /// カラーラベルを変更したとき。userInfo: ["url": URL, "colorLabel": String?]
+    static let photoColorLabelChanged  = Notification.Name("pixcurate.photoColorLabelChanged")
 }
 
 // MARK: - App Commands

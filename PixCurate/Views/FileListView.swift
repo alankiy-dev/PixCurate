@@ -9,6 +9,7 @@ struct FileListView: View {
     let sortColumn: ListColumn?
     let sortAscending: Bool
     let onRateSelected: (Int?) -> Void
+    let onColorLabelSelected: (ColorLabel?) -> Void
     let onSort: (ListColumn?) -> Void
     // コレクション
     let collections: [PhotoCollection]
@@ -201,6 +202,11 @@ struct FileListView: View {
         Button { openWindow(id: "photo-viewer", value: file.rawURL) } label: {
             Label("大きく表示", systemImage: "arrow.up.left.and.arrow.down.right")
         }
+        Button {
+            NSWorkspace.shared.activateFileViewerSelecting([file.rawURL])
+        } label: {
+            Label("Finderで表示", systemImage: "folder")
+        }
         Divider()
         Menu("評価を設定") {
             Button("★★★★★  5") { onRateSelected(5) }
@@ -246,6 +252,20 @@ struct FileListView: View {
            (0...5).contains(digit) {
             onRateSelected(digit == 0 ? nil : digit)
             return .handled
+        }
+
+        // カラーラベルキー r/y/g/b/p/x（選択中かつ修飾キーなし）
+        if !selection.isEmpty, press.modifiers.isEmpty,
+           let ch = press.characters.first {
+            switch ch {
+            case "r": onColorLabelSelected(.red);    return .handled
+            case "y": onColorLabelSelected(.yellow); return .handled
+            case "g": onColorLabelSelected(.green);  return .handled
+            case "b": onColorLabelSelected(.blue);   return .handled
+            case "p": onColorLabelSelected(.purple); return .handled
+            case "x": onColorLabelSelected(nil);     return .handled
+            default: break
+            }
         }
 
         // 矢印キー: グリッドモードのみ
@@ -346,6 +366,13 @@ struct PhotoCell: View {
                 } else {
                     ProgressView()
                         .scaleEffect(0.7)
+                }
+
+                // カラーラベル枠（選択より前に描画）
+                if let label = file.colorLabel {
+                    RoundedRectangle(cornerRadius: 6)
+                        .stroke(label.color, lineWidth: isSelected ? 2 : 3)
+                        .frame(width: w, height: h)
                 }
 
                 if isSelected {

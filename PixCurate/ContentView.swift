@@ -207,6 +207,7 @@ class FileListViewModel {
         }
     }
 
+    var colorLabelFilter: Set<ColorLabel> = []
     var locationFilter: Set<UUID> = []
     var shotDateFrom: Date? = nil      // nilなら無効
     var shotDateTo: Date? = nil
@@ -287,6 +288,10 @@ class FileListViewModel {
         update(rawURL: rawURL) { $0.rating = rating }
     }
 
+    func updateColorLabel(for rawURL: URL, colorLabel: ColorLabel?) {
+        update(rawURL: rawURL) { $0.colorLabel = colorLabel }
+    }
+
     func updateTags(for rawURL: URL, tags: [String]) {
         update(rawURL: rawURL) { $0.tags = tags }
     }
@@ -323,6 +328,7 @@ class FileListViewModel {
             }
             guard typeOK else { return false }
             let ratingOK = minRating == 0 || (file.rating ?? 0) >= minRating
+            let colorLabelOK = colorLabelFilter.isEmpty || (file.colorLabel.map { colorLabelFilter.contains($0) } ?? false)
             let tagOK = filterGroups.isEmpty || filterGroups.allSatisfy { group in
                 group.isEmpty || group.contains { file.tags.contains($0) }
             }
@@ -348,7 +354,7 @@ class FileListViewModel {
             } else {
                 xmpOK = true
             }
-            return ratingOK && tagOK && locationOK && shotDateOK && xmpOK
+            return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK
         }
         applyListSort()
     }
@@ -470,6 +476,7 @@ struct ContentView: View {
     @State private var keepStructure: Bool = UserDefaults.standard.bool(forKey: Keys.keepStructure)
     @State private var selection: Set<UUID> = []
     @State private var filterGroups: [TagFilterGroup] = []
+    @State private var selectedColorLabels: Set<ColorLabel> = []
     @State private var selectedLocationIds: Set<UUID> = []
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showDisplaySettings = false
@@ -486,6 +493,7 @@ struct ContentView: View {
     @State private var shotDateFrom: Date      = UserDefaults.standard.object(forKey: Keys.shotDateFrom) as? Date ?? Calendar.current.date(byAdding: .month, value: -1, to: Date())!
     @State private var shotDateTo: Date        = UserDefaults.standard.object(forKey: Keys.shotDateTo)   as? Date ?? Date()
     @State private var annualFilterDays: Int   = UserDefaults.standard.object(forKey: Keys.annualFilterDays) as? Int ?? 14
+    @State private var colorLabelFilterExpanded = true
     @State private var xmpFilterExpanded       = UserDefaults.standard.object(forKey: Keys.xmpFilterExpanded)       as? Bool ?? true
     @State private var useXmpSince: Bool = UserDefaults.standard.bool(forKey: Keys.useXmpSince)
     @State private var xmpSinceDate: Date = UserDefaults.standard.object(forKey: Keys.xmpSinceDate) as? Date
@@ -572,6 +580,12 @@ struct ContentView: View {
             guard let url = note.userInfo?["url"] as? URL else { return }
             let rating = note.userInfo?["rating"] as? Int
             vm.updateRating(for: url, rating: rating)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .photoColorLabelChanged)) { note in
+            guard let url = note.userInfo?["url"] as? URL else { return }
+            let labelStr = note.userInfo?["colorLabel"] as? String
+            let label = labelStr.flatMap { ColorLabel(rawValue: $0) }
+            vm.updateColorLabel(for: url, colorLabel: label)
         }
         .onChange(of: displaySettings.viewMode) { _, newMode in
             resizeWindowForMode(newMode)
@@ -728,6 +742,9 @@ struct ContentView: View {
                     .onChange(of: ratingFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.ratingFilterExpanded)
                     }
+
+                    // カラーラベル
+                    colorLabelFilterSection
 
                     // タグ
                     if !tagStore.tags.isEmpty {
@@ -1112,6 +1129,75 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Color label filter UI
+
+    private var colorLabelFilterSection: some View {
+        DisclosureGroup(isExpanded: $colorLabelFilterExpanded) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    // 全解除ボタン
+                    let noneSelected = selectedColorLabels.isEmpty
+                    Button {
+                        selectedColorLabels.removeAll()
+                        applyColorLabelFilter()
+                    } label: {
+                        ZStack {
+                            Circle()
+                                .stroke(noneSelected ? Color.accentColor : Color.secondary.opacity(0.35), lineWidth: 1.5)
+                                .frame(width: 24, height: 24)
+                            Image(systemName: "xmark")
+                                .font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(noneSelected ? Color.accentColor : Color.secondary.opacity(0.6))
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .help("すべて解除（全件表示）")
+
+                    ForEach(ColorLabel.allCases, id: \.self) { label in
+                        let isOn = selectedColorLabels.contains(label)
+                        Button {
+                            if isOn {
+                                selectedColorLabels.remove(label)
+                            } else {
+                                selectedColorLabels.insert(label)
+                            }
+                            applyColorLabelFilter()
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .fill(label.color)
+                                    .frame(width: 24, height: 24)
+                                if isOn {
+                                    Circle()
+                                        .stroke(Color.white, lineWidth: 2.5)
+                                        .frame(width: 24, height: 24)
+                                    Circle()
+                                        .stroke(label.color, lineWidth: 2)
+                                        .frame(width: 30, height: 30)
+                                }
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .help(label.localizedName + "（" + String(label.keyChar).uppercased() + "キー）")
+                    }
+                    Spacer()
+                }
+                .padding(.top, 4)
+                .padding(.bottom, selectedColorLabels.isEmpty ? 4 : 2)
+
+                if !selectedColorLabels.isEmpty {
+                    Text(selectedColorLabels.map(\.localizedName).sorted().joined(separator: "・") + " で絞り込み中")
+                        .font(.caption2)
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.bottom, 4)
+                }
+            }
+        } label: {
+            filterLabel("カラーラベル", icon: "circle.fill", color: .pink)
+        }
+        .listRowInsets(SidebarLayout.rowInsets)
+    }
+
     // MARK: - Sidebar layout constants
 
     private enum SidebarLayout {
@@ -1223,6 +1309,27 @@ struct ContentView: View {
             locationIds: Array(selectedLocationIds)
         )
         presetStore.add(preset)
+    }
+
+    private func applyColorLabelFilter() {
+        vm.colorLabelFilter = selectedColorLabels
+        vm.applyFilter(minRating: minRating)
+    }
+
+    private func applyColorLabelToSelection(label: ColorLabel?) {
+        let files = vm.filteredFiles.filter { selection.contains($0.id) }
+        guard !files.isEmpty else { return }
+        Task.detached(priority: .userInitiated) {
+            for file in files {
+                _ = XMPService.writeColorLabel(to: file.xmpURL, label: label)
+            }
+            let updates = files.map { $0.rawURL }
+            await MainActor.run {
+                for url in updates {
+                    vm.updateColorLabel(for: url, colorLabel: label)
+                }
+            }
+        }
     }
 
     private func applyRatingToSelection(rating: Int?) {
@@ -1720,6 +1827,7 @@ struct ContentView: View {
                     sortColumn: vm.listSortColumn,
                     sortAscending: vm.listSortAscending,
                     onRateSelected: { applyRatingToSelection(rating: $0) },
+                    onColorLabelSelected: { applyColorLabelToSelection(label: $0) },
                     onSort: { vm.toggleListSort(column: $0, minRating: minRating) },
                     collections: collectionStore.collections,
                     activeCollectionId: activeCollection?.id,

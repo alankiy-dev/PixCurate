@@ -14,8 +14,14 @@ struct PhotoViewerView: View {
 
     /// 現在のファイルの評価（DB から読み込み、キー操作で更新）
     @State private var currentRating: Int? = nil
+    /// 現在のファイルのカラーラベル
+    @State private var currentColorLabel: ColorLabel? = nil
     /// 評価変更フィードバック用（一時的に大きく表示）
     @State private var ratingFeedback: Int? = nil
+    /// カラーラベル変更フィードバック（表示中かどうか）
+    @State private var showColorLabelFeedback = false
+    /// カラーラベル変更フィードバックの値（nil = 解除）
+    @State private var colorLabelFeedbackValue: ColorLabel? = nil
     @FocusState private var isFocused: Bool
 
     private var effectiveOffset: CGSize {
@@ -80,7 +86,7 @@ struct PhotoViewerView: View {
                     .foregroundStyle(.white.opacity(0.4))
             }
 
-            // 下部オーバーレイ：ファイル名 ＋ 評価
+            // 下部オーバーレイ：ファイル名 ＋ カラーラベル ＋ 評価
             VStack {
                 Spacer()
                 HStack(alignment: .center, spacing: 12) {
@@ -89,6 +95,16 @@ struct PhotoViewerView: View {
                         .foregroundStyle(.white.opacity(0.7))
 
                     Spacer()
+
+                    // カラーラベルドット
+                    if let label = currentColorLabel {
+                        Circle()
+                            .fill(label.color)
+                            .frame(width: 12, height: 12)
+                            .overlay(
+                                Circle().stroke(Color.white.opacity(0.6), lineWidth: 1)
+                            )
+                    }
 
                     // 評価バッジ
                     HStack(spacing: 3) {
@@ -103,6 +119,39 @@ struct PhotoViewerView: View {
                 .padding(.vertical, 8)
                 .background(.black.opacity(0.55))
                 .padding(.bottom, 0)
+            }
+
+            // カラーラベル変更フィードバック（評価フィードバックより上に表示）
+            if showColorLabelFeedback {
+                VStack(spacing: 6) {
+                    if let label = colorLabelFeedbackValue {
+                        Circle()
+                            .fill(label.color)
+                            .frame(width: 44, height: 44)
+                            .overlay(Circle().stroke(Color.white.opacity(0.6), lineWidth: 2))
+                        Text(label.localizedName)
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.9))
+                    } else {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.white.opacity(0.5), lineWidth: 2)
+                                .frame(width: 44, height: 44)
+                            Image(systemName: "xmark")
+                                .font(.system(size: 16, weight: .bold))
+                                .foregroundStyle(.white.opacity(0.7))
+                        }
+                        Text("ラベルを解除")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.vertical, 14)
+                .background(.black.opacity(0.6))
+                .clipShape(RoundedRectangle(cornerRadius: 12))
+                .offset(y: -60)  // 評価フィードバックと重ならないようにオフセット
+                .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
 
             // 評価変更フィードバック（中央に一瞬表示）
@@ -137,11 +186,22 @@ struct PhotoViewerView: View {
             closeWindow()
             return .handled
         }
-        // 数字キー 0〜5 で評価
+        // 数字キー 0〜5 で評価 / r,y,g,b,p,x でカラーラベル
         .onKeyPress(phases: .down) { press in
             if let rating = ratingFromKey(press.key) {
                 applyRating(rating)
                 return .handled
+            }
+            if press.modifiers.isEmpty, let ch = press.characters.first {
+                switch ch {
+                case "r": applyColorLabel(.red);    return .handled
+                case "y": applyColorLabel(.yellow); return .handled
+                case "g": applyColorLabel(.green);  return .handled
+                case "b": applyColorLabel(.blue);   return .handled
+                case "p": applyColorLabel(.purple); return .handled
+                case "x": applyColorLabel(nil);     return .handled
+                default: break
+                }
             }
             return .ignored
         }
@@ -152,8 +212,10 @@ struct PhotoViewerView: View {
             scale = 1.0
             offset = .zero
             ratingFeedback = nil
-            // 評価を DB から読み込む
+            showColorLabelFeedback = false
+            // メタデータを読み込む
             currentRating = IndexService.loadRating(for: url)
+            currentColorLabel = XMPService.readColorLabel(xmpURL: url.deletingPathExtension().appendingPathExtension("xmp"))
             image = await ThumbnailService.fullPreview(for: url)
             isLoading = false
         }
@@ -176,6 +238,31 @@ struct PhotoViewerView: View {
         case "4": return 4
         case "5": return 5
         default:  return nil
+        }
+    }
+
+    private func applyColorLabel(_ label: ColorLabel?) {
+        currentColorLabel = label
+
+        // フィードバック表示（0.8秒後に消す）
+        withAnimation(.easeIn(duration: 0.1)) {
+            colorLabelFeedbackValue = label
+            showColorLabelFeedback = true
+        }
+        Task {
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            withAnimation(.easeOut(duration: 0.2)) { showColorLabelFeedback = false }
+        }
+
+        // XMP に書き込み
+        let xmpURL = url.deletingPathExtension().appendingPathExtension("xmp")
+        Task.detached(priority: .userInitiated) {
+            _ = XMPService.writeColorLabel(to: xmpURL, label: label)
+            NotificationCenter.default.post(
+                name: .photoColorLabelChanged,
+                object: nil,
+                userInfo: ["url": url, "colorLabel": label?.rawValue as Any]
+            )
         }
     }
 

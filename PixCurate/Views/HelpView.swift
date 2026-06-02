@@ -143,6 +143,12 @@ struct HelpView: View {
                     HelpItem(label: "拡大表示を閉じる") {
                         "拡大表示ウィンドウで Esc キーを押すと閉じます。"
                     }
+                    HelpItem(label: "カラーラベルを設定") {
+                        "画像を選択した状態で R（赤）・Y（黄）・G（緑）・B（青）・P（紫）キーを押すとカラーラベルを設定できます。X キーでラベルを解除します。複数選択中は全てに一括適用されます。ラベルはサムネイルの枠として表示され、XMPサイドカーの xmp:Label フィールドに書き込まれます（Lightroom と互換）。拡大表示ウィンドウでも同じキーで設定できます。"
+                    }
+                    HelpItem(label: "カラーラベルで絞り込み") {
+                        "左パネル「フィルター」→「カラーラベル」の色付き丸をクリックして絞り込みます。複数の色を選択すると OR 条件になります。× ボタンでフィルターを解除します。"
+                    }
                 }
 
                 HelpSection(title: "コピー機能", icon: "arrow.right.circle") {
@@ -231,11 +237,17 @@ struct HelpView: View {
                         VStack(alignment: .leading, spacing: 6) {
                             ShortcutRow(key: "0", desc: "評価を解除")
                             ShortcutRow(key: "1〜5", desc: "評価を設定")
+                            ShortcutRow(key: "R", desc: "カラーラベル：赤")
+                            ShortcutRow(key: "Y", desc: "カラーラベル：黄")
+                            ShortcutRow(key: "G", desc: "カラーラベル：緑")
                             ShortcutRow(key: "⌘R", desc: "再スキャン")
                             ShortcutRow(key: "Esc", desc: "拡大表示を閉じる")
                         }
                         Spacer()
                         VStack(alignment: .leading, spacing: 6) {
+                            ShortcutRow(key: "B", desc: "カラーラベル：青")
+                            ShortcutRow(key: "P", desc: "カラーラベル：紫")
+                            ShortcutRow(key: "X", desc: "カラーラベルを解除")
                             ShortcutRow(key: "⌘クリック", desc: "複数選択")
                             ShortcutRow(key: "Shiftクリック", desc: "範囲選択")
                             ShortcutRow(key: "ダブルクリック", desc: "拡大表示")

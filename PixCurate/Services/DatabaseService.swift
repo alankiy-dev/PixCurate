@@ -54,6 +54,9 @@ final class DatabaseService: @unchecked Sendable {
                 PRIMARY KEY (file_path, tag_name)
             );
         """)
+        // マイグレーション: color_label カラムを追加（既存DBには存在しない場合がある）
+        exec("ALTER TABLE files ADD COLUMN color_label TEXT;")
+        exec("CREATE INDEX IF NOT EXISTS idx_files_color_label ON files(color_label);")
         exec("CREATE INDEX IF NOT EXISTS idx_files_rating    ON files(rating);")
         exec("CREATE INDEX IF NOT EXISTS idx_files_shot_date ON files(shot_date);")
         exec("CREATE INDEX IF NOT EXISTS idx_file_tags_path  ON file_tags(file_path);")
@@ -80,24 +83,26 @@ final class DatabaseService: @unchecked Sendable {
 
     nonisolated func upsert(_ file: PhotoFile, xmpModifiedAt: Date?) {
         queue.sync {
-            let path   = file.rawURL.path
-            let name   = file.filename
-            let date   = file.shotDate.map { iso($0) }
-            let rating = file.rating
-            let locId  = file.locationId?.uuidString
-            let xmpMod = xmpModifiedAt.map { iso($0) }
+            let path       = file.rawURL.path
+            let name       = file.filename
+            let date       = file.shotDate.map { iso($0) }
+            let rating     = file.rating
+            let locId      = file.locationId?.uuidString
+            let xmpMod     = xmpModifiedAt.map { iso($0) }
+            let colorLabel = file.colorLabel?.rawValue
 
             exec("""
-                INSERT INTO files(file_path, file_name, shot_date, rating, location_id, xmp_modified_at)
-                VALUES (?,?,?,?,?,?)
+                INSERT INTO files(file_path, file_name, shot_date, rating, location_id, xmp_modified_at, color_label)
+                VALUES (?,?,?,?,?,?,?)
                 ON CONFLICT(file_path) DO UPDATE SET
                   file_name       = excluded.file_name,
                   shot_date       = excluded.shot_date,
                   rating          = excluded.rating,
                   location_id     = excluded.location_id,
                   xmp_modified_at = excluded.xmp_modified_at,
+                  color_label     = excluded.color_label,
                   indexed_at      = strftime('%Y-%m-%dT%H:%M:%SZ','now');
-            """, bindings: [path, name, date as Any, rating as Any, locId as Any, xmpMod as Any])
+            """, bindings: [path, name, date as Any, rating as Any, locId as Any, xmpMod as Any, colorLabel as Any])
 
             exec("DELETE FROM file_tags WHERE file_path = ?;", bindings: [path])
             for tag in file.tags {
@@ -129,7 +134,8 @@ final class DatabaseService: @unchecked Sendable {
             let sql = """
                 SELECT f.file_path, f.file_name, f.shot_date, f.rating,
                        f.location_id, f.xmp_modified_at,
-                       GROUP_CONCAT(t.tag_name, '\t') AS tags
+                       GROUP_CONCAT(t.tag_name, '\t') AS tags,
+                       f.color_label
                 FROM files f
                 LEFT JOIN file_tags t ON t.file_path = f.file_path
                 WHERE f.file_path LIKE ? ESCAPE '\\'
@@ -312,7 +318,8 @@ final class DatabaseService: @unchecked Sendable {
             let sql = """
                 SELECT f.file_path, f.file_name, f.shot_date, f.rating,
                        f.location_id, f.xmp_modified_at,
-                       GROUP_CONCAT(t.tag_name, '\t') AS tags
+                       GROUP_CONCAT(t.tag_name, '\t') AS tags,
+                       f.color_label
                 FROM files f
                 LEFT JOIN file_tags t ON t.file_path = f.file_path
                 WHERE f.file_path = ?
@@ -370,6 +377,7 @@ struct DBFileRow: Sendable {
     let locationId: UUID?
     let xmpModifiedAt: Date?
     let tags: [String]
+    let colorLabel: ColorLabel?
 
     init(stmt: OpaquePointer) {
         path     = String(cString: sqlite3_column_text(stmt, 0))
@@ -381,6 +389,7 @@ struct DBFileRow: Sendable {
         xmpModifiedAt = sqlite3_column_text(stmt, 5).flatMap { fmt.date(from: String(cString: $0)) }
         let tagStr = sqlite3_column_text(stmt, 6).map { String(cString: $0) } ?? ""
         tags = tagStr.isEmpty ? [] : tagStr.components(separatedBy: "\t")
+        colorLabel = sqlite3_column_text(stmt, 7).flatMap { ColorLabel(rawValue: String(cString: $0)) }
     }
 
     nonisolated func toPhotoFile() -> PhotoFile {
@@ -390,6 +399,7 @@ struct DBFileRow: Sendable {
         f.tags           = tags
         f.locationId     = locationId
         f.xmpModifiedAt  = xmpModifiedAt
+        f.colorLabel     = colorLabel
         return f
     }
 }

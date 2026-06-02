@@ -93,6 +93,7 @@ enum IndexService {
                     file.rating       = XMPService.readRating(xmpURL: xmpURL)
                     file.tags         = XMPTagService.readTags(xmpURL: xmpURL)
                     file.locationPath = XMPLocationService.readLocation(xmpURL: xmpURL)
+                    file.colorLabel   = XMPService.readColorLabel(xmpURL: xmpURL)
                 }
                 file.shotDate = EXIFService.readShotDate(url: fileURL)
                     ?? (try? fm.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
@@ -172,6 +173,7 @@ enum IndexService {
                 file.rating       = XMPService.readRating(xmpURL: xmpURL)
                 file.tags         = XMPTagService.readTags(xmpURL: xmpURL)
                 file.locationPath = XMPLocationService.readLocation(xmpURL: xmpURL)
+                file.colorLabel   = XMPService.readColorLabel(xmpURL: xmpURL)
             }
             file.shotDate = EXIFService.readShotDate(url: fileURL)
                 ?? (try? fm.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date

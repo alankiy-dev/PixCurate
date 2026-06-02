@@ -81,6 +81,89 @@ enum XMPService {
         return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
     }
 
+    // MARK: - Color Label 読み書き (xmp:Label)
+
+    nonisolated static func readColorLabel(xmpURL: URL) -> ColorLabel? {
+        guard let content = try? String(contentsOf: xmpURL, encoding: .utf8) else { return nil }
+        // 属性形式: xmp:Label="Red"
+        if let regex = try? NSRegularExpression(pattern: #"xmp:Label="([^"]+)""#),
+           let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+           let range = Range(match.range(at: 1), in: content) {
+            return ColorLabel(rawValue: String(content[range]))
+        }
+        // 要素形式: <xmp:Label>Red</xmp:Label>
+        if let regex = try? NSRegularExpression(pattern: #"<xmp:Label>([^<]+)</xmp:Label>"#),
+           let match = regex.firstMatch(in: content, range: NSRange(content.startIndex..., in: content)),
+           let range = Range(match.range(at: 1), in: content) {
+            return ColorLabel(rawValue: String(content[range]))
+        }
+        return nil
+    }
+
+    nonisolated static func writeColorLabel(to xmpURL: URL, label: ColorLabel?) -> Bool {
+        let labelValue = label?.rawValue ?? ""
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: xmpURL.path) {
+            if labelValue.isEmpty { return true } // 解除かつファイルなし：何もしない
+            let content = makeMinimalXMPWithLabel(label: labelValue)
+            return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
+        }
+
+        guard var content = try? String(contentsOf: xmpURL, encoding: .utf8) else { return false }
+
+        // 属性形式を置換
+        if let regex = try? NSRegularExpression(pattern: #"xmp:Label="[^"]*""#) {
+            let ns = NSRange(content.startIndex..., in: content)
+            if regex.firstMatch(in: content, range: ns) != nil {
+                let replacement = labelValue.isEmpty ? "" : "xmp:Label=\"\(labelValue)\""
+                content = regex.stringByReplacingMatches(in: content, range: ns, withTemplate: replacement)
+                return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
+            }
+        }
+
+        // 要素形式を置換
+        if let regex = try? NSRegularExpression(pattern: #"<xmp:Label>[^<]*</xmp:Label>"#) {
+            let ns = NSRange(content.startIndex..., in: content)
+            if regex.firstMatch(in: content, range: ns) != nil {
+                let replacement = labelValue.isEmpty ? "" : "<xmp:Label>\(labelValue)</xmp:Label>"
+                content = regex.stringByReplacingMatches(in: content, range: ns, withTemplate: replacement)
+                return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
+            }
+        }
+
+        // 既存エントリなし → ラベルがある場合のみ挿入
+        if !labelValue.isEmpty {
+            if content.contains("xmlns:xmp=") {
+                content = content.replacingOccurrences(
+                    of: "</rdf:Description>",
+                    with: "  xmp:Label=\"\(labelValue)\"\n  </rdf:Description>",
+                    range: content.range(of: "</rdf:Description>")
+                )
+            } else {
+                content = content.replacingOccurrences(
+                    of: "<rdf:Description ",
+                    with: "<rdf:Description xmlns:xmp=\"http://ns.adobe.com/xap/1.0/\" xmp:Label=\"\(labelValue)\" ",
+                    range: content.range(of: "<rdf:Description ")
+                )
+            }
+        }
+        return (try? content.write(to: xmpURL, atomically: true, encoding: .utf8)) != nil
+    }
+
+    nonisolated private static func makeMinimalXMPWithLabel(label: String) -> String {
+        """
+        <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
+        <x:xmpmeta xmlns:x="adobe:ns:meta/">
+         <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+          <rdf:Description rdf:about=""
+            xmlns:xmp="http://ns.adobe.com/xap/1.0/"
+            xmp:Label="\(label)"/>
+         </rdf:RDF>
+        </x:xmpmeta>
+        <?xpacket end="w"?>
+        """
+    }
+
     nonisolated private static func makeMinimalXMP(rating: Int) -> String {
         """
         <?xpacket begin="" id="W5M0MpCehiHzreSzNTczkc9d"?>
