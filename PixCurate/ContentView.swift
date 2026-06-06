@@ -45,6 +45,7 @@ private enum Keys {
     static let useXmpSince              = "pixcurate.useXmpSince"
     static let xmpSinceDate             = "pixcurate.xmpSinceDate"
     static let ratingFilterExpanded     = "pixcurate.filter.rating.expanded"
+    static let ratingFilterMode         = "pixcurate.filter.rating.mode"
     static let tagFilterExpanded        = "pixcurate.filter.tag.expanded"
     static let locationFilterExpanded   = "pixcurate.filter.location.expanded"
     static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
@@ -68,6 +69,13 @@ enum DateFilterMode: String {
     case off    = "off"     // 撮影日フィルターなし
     case annual = "annual"  // 例年の今頃
     case range  = "range"   // 期間指定（From/To）
+}
+
+// MARK: - RatingFilterMode
+
+enum RatingFilterMode: String {
+    case atLeast = "atLeast"   // N星以上
+    case exactly = "exactly"   // N星のみ
 }
 
 // MARK: - FileTypeFilter
@@ -115,6 +123,7 @@ class FileListViewModel {
     var copyTotal: Int = 0
     var copyCurrent: Int = 0
     var exiftoolMissing = false
+    var ratingFilterMode: RatingFilterMode = .atLeast
 
     // MARK: - Load（DB優先 → 差分スキャン）
 
@@ -134,7 +143,7 @@ class FileListViewModel {
                 guard let self else { return }
                 if hasCached {
                     allFiles = cached
-                    applyFilter(minRating: minRating)
+                    applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                     isLoading = false
                     isIndexing = true
                     indexStatus = "DB: \(cached.count)件（更新確認中…）"
@@ -147,7 +156,7 @@ class FileListViewModel {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
-                applyFilter(minRating: minRating)
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isLoading = false
                 isIndexing = false
                 indexStatus = "DB: \(files.count)件"
@@ -176,7 +185,7 @@ class FileListViewModel {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
-                applyFilter(minRating: minRating)
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isIndexing = false
                 indexStatus = "DB: \(files.count)件（新規\(result.added) 更新\(result.updated) 削除\(result.removed)）"
             }
@@ -199,7 +208,7 @@ class FileListViewModel {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
-                applyFilter(minRating: minRating)
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isLoading = false
                 isIndexing = false
                 indexStatus = "DB再構築完了: \(files.count)件"
@@ -230,7 +239,7 @@ class FileListViewModel {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
-                applyFilter(minRating: minRating)
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isLoading = false
                 indexStatus = "\(files.count)件"
             }
@@ -261,14 +270,14 @@ class FileListViewModel {
     }
 
     /// グリッドのソートUIなど、列・方向を直接指定したいときに使う
-    func setSort(column: ListColumn?, ascending: Bool, minRating: Int) {
+    func setSort(column: ListColumn?, ascending: Bool, minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
         listSortColumn = column
         listSortAscending = ascending
         saveSortState()
-        applyFilter(minRating: minRating)
+        applyFilter(minRating: minRating, ratingMode: ratingMode)
     }
 
-    func toggleListSort(column: ListColumn?, minRating: Int) {
+    func toggleListSort(column: ListColumn?, minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
         if listSortColumn == column {
             if listSortAscending {
                 listSortAscending = false
@@ -281,7 +290,7 @@ class FileListViewModel {
             listSortAscending = true
         }
         saveSortState()
-        applyFilter(minRating: minRating)
+        applyFilter(minRating: minRating, ratingMode: ratingMode)
     }
 
     func updateRating(for rawURL: URL, rating: Int?) {
@@ -317,7 +326,7 @@ class FileListViewModel {
     // Each inner array = one OR-group; outer array connected by AND
     var filterGroups: [[String]] = []
 
-    func applyFilter(minRating: Int) {
+    func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
         let cal = Calendar.current
         filteredFiles = allFiles.filter { file in
             let typeOK: Bool
@@ -327,7 +336,14 @@ class FileListViewModel {
             case .both:     typeOK = true
             }
             guard typeOK else { return false }
-            let ratingOK = minRating == 0 || (file.rating ?? 0) >= minRating
+            let ratingOK: Bool
+            if minRating == 0 {
+                ratingOK = true
+            } else if ratingMode == .exactly {
+                ratingOK = (file.rating ?? 0) == minRating
+            } else {
+                ratingOK = (file.rating ?? 0) >= minRating
+            }
             let colorLabelOK = colorLabelFilter.isEmpty || (file.colorLabel.map { colorLabelFilter.contains($0) } ?? false)
             let tagOK = filterGroups.isEmpty || filterGroups.allSatisfy { group in
                 group.isEmpty || group.contains { file.tags.contains($0) }
@@ -486,6 +502,7 @@ struct ContentView: View {
     @State private var deleteConfirmPreset: FilterPreset?        = nil
     @State private var fileTypeFilter: FileTypeFilter = FileTypeFilter(rawValue: UserDefaults.standard.string(forKey: Keys.fileTypeFilter) ?? "") ?? .rawOnly
     @State private var ratingFilterExpanded    = UserDefaults.standard.object(forKey: Keys.ratingFilterExpanded)    as? Bool ?? true
+    @State private var ratingFilterMode: RatingFilterMode = RatingFilterMode(rawValue: UserDefaults.standard.string(forKey: Keys.ratingFilterMode) ?? "") ?? .atLeast
     @State private var tagFilterExpanded       = UserDefaults.standard.object(forKey: Keys.tagFilterExpanded)       as? Bool ?? true
     @State private var locationFilterExpanded  = UserDefaults.standard.object(forKey: Keys.locationFilterExpanded)  as? Bool ?? true
     @State private var shotDateFilterExpanded  = UserDefaults.standard.object(forKey: Keys.shotDateFilterExpanded)  as? Bool ?? true
@@ -548,6 +565,7 @@ struct ContentView: View {
                 vm.locationFilter = selectedLocationIds
                 vm.filterGroups = filterGroups.map { Array($0.tagNames) }
                 vm.fileTypeFilter = fileTypeFilter
+                vm.ratingFilterMode = ratingFilterMode
                 switch dateFilterMode {
                 case .off:
                     vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
@@ -564,7 +582,13 @@ struct ContentView: View {
         }
         .onChange(of: minRating) { _, newVal in
             UserDefaults.standard.set(newVal, forKey: Keys.minRating)
-            vm.applyFilter(minRating: newVal)
+            vm.applyFilter(minRating: newVal, ratingMode: ratingFilterMode)
+            clearActivePreset()
+        }
+        .onChange(of: ratingFilterMode) { _, newVal in
+            UserDefaults.standard.set(newVal.rawValue, forKey: Keys.ratingFilterMode)
+            vm.ratingFilterMode = newVal   // バックグラウンドTaskの内部applyFilterにも反映
+            vm.applyFilter(minRating: minRating, ratingMode: newVal)
             clearActivePreset()
         }
         .onReceive(NotificationCenter.default.publisher(for: .rescanRequested)) { _ in
@@ -590,7 +614,7 @@ struct ContentView: View {
         .onChange(of: displaySettings.viewMode) { _, newMode in
             resizeWindowForMode(newMode)
         }
-        .alert("エクスポートの確認", isPresented: Binding(
+        .alert("エクスポートの確認", isPresented: Binding<Bool>(
             get: { exportConfirm != nil },
             set: { if !$0 { exportConfirm = nil } }
         )) {
@@ -618,7 +642,7 @@ struct ContentView: View {
                 }
             }
         } message: { Text("名前を入力してください") }
-        .alert("コレクション名の変更", isPresented: Binding(
+        .alert("コレクション名の変更", isPresented: Binding<Bool>(
             get: { editingCollection != nil },
             set: { if !$0 { editingCollection = nil } }
         )) {
@@ -634,7 +658,7 @@ struct ContentView: View {
         } message: {
             Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
         }
-        .alert("コレクションを削除", isPresented: Binding(
+        .alert("コレクションを削除", isPresented: Binding<Bool>(
             get: { deleteConfirmCollection != nil },
             set: { if !$0 { deleteConfirmCollection = nil } }
         )) {
@@ -654,7 +678,7 @@ struct ContentView: View {
                 Text("「\(col.name)」を削除します。この操作は元に戻せません。")
             }
         }
-        .alert("プリセットを削除", isPresented: Binding(
+        .alert("プリセットを削除", isPresented: Binding<Bool>(
             get: { deleteConfirmPreset != nil },
             set: { if !$0 { deleteConfirmPreset = nil } }
         )) {
@@ -702,7 +726,7 @@ struct ContentView: View {
                                     fileTypeFilter = t
                                     UserDefaults.standard.set(t.rawValue, forKey: Keys.fileTypeFilter)
                                     vm.fileTypeFilter = t
-                                    vm.applyFilter(minRating: minRating)
+                                    vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                                 } label: {
                                     Text(t.shortLabel)
                                         .font(.system(size: 12, weight: selected ? .semibold : .regular))
@@ -729,8 +753,13 @@ struct ContentView: View {
 
                     // 評価
                     DisclosureGroup(isExpanded: $ratingFilterExpanded) {
-                        StarPickerView(selection: $minRating)
-                            .padding(.vertical, 2)
+                        VStack(alignment: .leading, spacing: 4) {
+                            StarPickerView(selection: $minRating)
+                            if minRating > 0 {
+                                ratingModeToggle
+                            }
+                        }
+                        .padding(.vertical, 2)
                     } label: {
                         filterLabel("評価", icon: "star.fill", color: .yellow)
                     }
@@ -1127,6 +1156,33 @@ struct ContentView: View {
 
     // MARK: - Color label filter UI
 
+    private var ratingModeToggle: some View {
+        HStack(spacing: 6) {
+            ratingModeButton(label: "以上", mode: .atLeast)
+            ratingModeButton(label: "のみ", mode: .exactly)
+            Spacer()
+        }
+    }
+
+    private func ratingModeButton(label: String, mode: RatingFilterMode) -> some View {
+        let isSelected = ratingFilterMode == mode
+        return Button { ratingFilterMode = mode } label: {
+            Text(label)
+                .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isSelected ? Color.accentColor.opacity(0.15) : Color.secondary.opacity(0.08))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 5)
+                        .stroke(isSelected ? Color.accentColor.opacity(0.5) : Color.clear, lineWidth: 1)
+                )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var colorLabelFilterSection: some View {
         DisclosureGroup(isExpanded: $colorLabelFilterExpanded) {
             VStack(alignment: .leading, spacing: 4) {
@@ -1235,13 +1291,13 @@ struct ContentView: View {
 
     private func applyTagFilter(clearPreset: Bool = true) {
         vm.filterGroups = filterGroups.map { Array($0.tagNames) }
-        vm.applyFilter(minRating: minRating)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
     }
 
     private func applyLocationFilter(clearPreset: Bool = true) {
         vm.locationFilter = selectedLocationIds
-        vm.applyFilter(minRating: minRating)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
     }
 
@@ -1261,12 +1317,12 @@ struct ContentView: View {
             vm.shotDateFrom = shotDateFrom
             vm.shotDateTo   = shotDateTo
         }
-        vm.applyFilter(minRating: minRating)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
     }
 
     private func applyXmpFilter(clearPreset: Bool = true) {
         vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
-        vm.applyFilter(minRating: minRating)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
     }
 
@@ -1288,7 +1344,7 @@ struct ContentView: View {
 
     private func applyColorLabelFilter() {
         vm.colorLabelFilter = selectedColorLabels
-        vm.applyFilter(minRating: minRating)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
     }
 
     private func applyColorLabelToSelection(label: ColorLabel?) {
@@ -1673,7 +1729,7 @@ struct ContentView: View {
                             ] as [(ListColumn?, String)], id: \.1) { col, label in
                                 Button {
                                     vm.setSort(column: col, ascending: vm.listSortAscending,
-                                               minRating: minRating)
+                                               minRating: minRating, ratingMode: ratingFilterMode)
                                 } label: {
                                     if vm.listSortColumn == col {
                                         Label(label, systemImage: "checkmark")
@@ -1700,7 +1756,7 @@ struct ContentView: View {
                         Button {
                             vm.setSort(column: vm.listSortColumn,
                                        ascending: !vm.listSortAscending,
-                                       minRating: minRating)
+                                       minRating: minRating, ratingMode: ratingFilterMode)
                         } label: {
                             Image(systemName: vm.listSortAscending ? "arrow.up" : "arrow.down")
                                 .font(.system(size: 12, weight: .medium))
@@ -1803,7 +1859,7 @@ struct ContentView: View {
                     sortAscending: vm.listSortAscending,
                     onRateSelected: { applyRatingToSelection(rating: $0) },
                     onColorLabelSelected: { applyColorLabelToSelection(label: $0) },
-                    onSort: { vm.toggleListSort(column: $0, minRating: minRating) },
+                    onSort: { vm.toggleListSort(column: $0, minRating: minRating, ratingMode: ratingFilterMode) },
                     collections: collectionStore.collections,
                     activeCollectionId: activeCollection?.id,
                     onAddToCollection: { col, files in
