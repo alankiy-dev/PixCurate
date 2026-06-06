@@ -54,8 +54,13 @@ final class DatabaseService: @unchecked Sendable {
                 PRIMARY KEY (file_path, tag_name)
             );
         """)
-        // マイグレーション: color_label カラムを追加（既存DBには存在しない場合がある）
-        exec("ALTER TABLE files ADD COLUMN color_label TEXT;")
+        // マイグレーション: color_label カラムを追加（既存DBには存在しない場合のみ）
+        var checkStmt: OpaquePointer?
+        let columnExists = sqlite3_prepare_v2(db, "SELECT color_label FROM files LIMIT 0;", -1, &checkStmt, nil) == SQLITE_OK
+        sqlite3_finalize(checkStmt)
+        if !columnExists {
+            exec("ALTER TABLE files ADD COLUMN color_label TEXT;")
+        }
         exec("CREATE INDEX IF NOT EXISTS idx_files_color_label ON files(color_label);")
         exec("CREATE INDEX IF NOT EXISTS idx_files_rating    ON files(rating);")
         exec("CREATE INDEX IF NOT EXISTS idx_files_shot_date ON files(shot_date);")
