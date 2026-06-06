@@ -486,8 +486,8 @@ struct ContentView: View {
     @State private var vm = FileListViewModel()
     @Environment(TagStore.self) private var tagStore
 
-    @State private var srcURL: URL? = BookmarkStore.restore(Keys.srcPath)
-    @State private var dstURL: URL? = BookmarkStore.restore(Keys.dstPath)
+    @State private var srcURL: URL? = nil   // 起動後にバックグラウンドで復元（メインスレッドをブロックしない）
+    @State private var dstURL: URL? = nil   // 同上
     @State private var minRating: Int = UserDefaults.standard.object(forKey: Keys.minRating) as? Int ?? 1
     @State private var keepStructure: Bool = UserDefaults.standard.bool(forKey: Keys.keepStructure)
     @State private var selection: Set<UUID> = []
@@ -555,30 +555,39 @@ struct ContentView: View {
             columnVisibility = .all
             NotificationService.requestPermission()
         }
+        .task {
+            // ブックマーク解決をバックグラウンドで並列実行し、メインスレッドをブロックしない
+            // NAS/SMBが未接続でも起動を遅延させない
+            let srcTask = Task.detached { BookmarkStore.restore(Keys.srcPath) }
+            let dstTask = Task.detached { BookmarkStore.restore(Keys.dstPath) }
+            let (src, dst) = await (srcTask.value, dstTask.value)
+            // 解決できた分だけ反映（nil = 未設定 or ボリューム未接続 → ブックマークはそのまま保持）
+            if src != nil { srcURL = src }
+            if dst != nil { dstURL = dst }
+        }
         .background(WindowAccessor { window in
             window.setFrameAutosaveName("PixCurateMain")
         })
         .onChange(of: srcURL, initial: true) { _, newVal in
-            BookmarkStore.save(url: newVal, key: Keys.srcPath)
-            if let url = newVal {
-                vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
-                vm.locationFilter = selectedLocationIds
-                vm.filterGroups = filterGroups.map { Array($0.tagNames) }
-                vm.fileTypeFilter = fileTypeFilter
-                vm.ratingFilterMode = ratingFilterMode
-                switch dateFilterMode {
-                case .off:
-                    vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
-                case .annual:
-                    vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
-                case .range:
-                    vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
-                }
-                vm.load(from: url, minRating: minRating)
+            guard let url = newVal else { return }  // nil の場合はブックマークを消さずに無視
+            BookmarkStore.save(url: url, key: Keys.srcPath)
+            vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
+            vm.locationFilter = selectedLocationIds
+            vm.filterGroups = filterGroups.map { Array($0.tagNames) }
+            vm.fileTypeFilter = fileTypeFilter
+            vm.ratingFilterMode = ratingFilterMode
+            switch dateFilterMode {
+            case .off:
+                vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
+            case .annual:
+                vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
+            case .range:
+                vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
             }
+            vm.load(from: url, minRating: minRating)
         }
         .onChange(of: dstURL) { _, newVal in
-            BookmarkStore.save(url: newVal, key: Keys.dstPath)
+            if let url = newVal { BookmarkStore.save(url: url, key: Keys.dstPath) }
         }
         .onChange(of: minRating) { _, newVal in
             UserDefaults.standard.set(newVal, forKey: Keys.minRating)
