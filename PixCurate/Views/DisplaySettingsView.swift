@@ -50,6 +50,22 @@ struct DisplaySettingsView: View {
 
             Divider()
 
+            // 拡大表示のサイズ
+            Text("拡大表示のサイズ").font(.caption).foregroundStyle(.secondary)
+            Picker("", selection: $s.viewerSize) {
+                ForEach(DisplaySettings.ViewerSize.allCases, id: \.self) { v in
+                    Text(v.rawValue).tag(v)
+                }
+            }
+            .pickerStyle(.menu)
+            .labelsHidden()
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .onChange(of: s.viewerSize) { _, _ in s.save() }
+            Text("ダブルクリックで開くときの初期サイズ。右クリックメニューから個別に指定もできます。")
+                .font(.caption2).foregroundStyle(.tertiary)
+
+            Divider()
+
             if s.viewMode == .grid {
                 // グリッド設定
                 Text("サムネイルサイズ").font(.caption).foregroundStyle(.secondary)

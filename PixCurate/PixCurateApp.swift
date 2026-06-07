@@ -127,8 +127,12 @@ struct PixCurateApp: App {
             PixCurateCommands2()
         }
 
-        WindowGroup(id: "photo-viewer", for: URL.self) { $url in
-            PhotoViewerView(url: url ?? URL(fileURLWithPath: "/"))
+        WindowGroup(id: "photo-viewer", for: PhotoViewerRequest.self) { $request in
+            let req = request ?? PhotoViewerRequest(url: URL(fileURLWithPath: "/"))
+            PhotoViewerView(
+                url: req.url,
+                sizeMode: req.size ?? DisplaySettings.shared.viewerSize
+            )
         }
     }
 }

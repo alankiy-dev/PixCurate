@@ -3,7 +3,11 @@ import AppKit
 
 struct PhotoViewerView: View {
     let url: URL
+    var sizeMode: DisplaySettings.ViewerSize = .fit
     @Environment(\.dismiss) private var dismiss
+
+    @State private var window: NSWindow?
+    @State private var didApplySize = false
 
     @State private var image: NSImage?
     @State private var isLoading = true
@@ -34,11 +38,27 @@ struct PhotoViewerView: View {
             Color.black.ignoresSafeArea()
 
             if let img = image {
-                Image(nsImage: img)
-                    .resizable()
-                    .aspectRatio(contentMode: .fit)
-                    .scaleEffect(scale * magnifyBy)
-                    .offset(effectiveOffset)
+                GeometryReader { geo in
+                    let vw = geo.size.width
+                    let vh = geo.size.height
+                    let imgPx = pixelSize(of: img)
+                    // ベース倍率：ピクセル等倍は 100%、それ以外は画面に収まるように縮小（縦横中央）
+                    let baseScale: CGFloat = (sizeMode == .pixel)
+                        ? 1.0
+                        : min(vw / imgPx.width, vh / imgPx.height)
+                    let dispW = imgPx.width  * baseScale * scale * magnifyBy
+                    let dispH = imgPx.height * baseScale * scale * magnifyBy
+
+                    ZStack {
+                        Image(nsImage: img)
+                            .resizable()
+                            .interpolation(.high)
+                            .frame(width: dispW, height: dispH)
+                            .offset(effectiveOffset)
+                    }
+                    .frame(width: vw, height: vh)   // ビューポート内で中央寄せ
+                    .clipped()
+                    .contentShape(Rectangle())
                     .gesture(
                         MagnifyGesture()
                             .updating($magnifyBy) { value, state, _ in
@@ -46,23 +66,28 @@ struct PhotoViewerView: View {
                             }
                             .onEnded { value in
                                 scale = max(1.0, scale * value.magnification)
-                                if scale == 1.0 { offset = .zero }
+                                let dw = imgPx.width  * baseScale * scale
+                                let dh = imgPx.height * baseScale * scale
+                                offset = clampedOffset(offset,
+                                                       dispSize: CGSize(width: dw, height: dh),
+                                                       viewport: CGSize(width: vw, height: vh))
                             }
                     )
                     .gesture(
                         DragGesture()
                             .updating($dragDelta) { value, state, _ in
-                                if scale > 1.0 { state = value.translation }
+                                if dispW > vw || dispH > vh { state = value.translation }
                             }
                             .onEnded { value in
-                                if scale > 1.0 {
-                                    offset = CGSize(
-                                        width:  offset.width  + value.translation.width,
-                                        height: offset.height + value.translation.height
-                                    )
-                                } else {
-                                    offset = .zero
-                                }
+                                let dw = imgPx.width  * baseScale * scale
+                                let dh = imgPx.height * baseScale * scale
+                                let proposed = CGSize(
+                                    width:  offset.width  + value.translation.width,
+                                    height: offset.height + value.translation.height
+                                )
+                                offset = clampedOffset(proposed,
+                                                       dispSize: CGSize(width: dw, height: dh),
+                                                       viewport: CGSize(width: vw, height: vh))
                             }
                     )
                     .onTapGesture(count: 2) {
@@ -71,6 +96,7 @@ struct PhotoViewerView: View {
                             offset = .zero
                         }
                     }
+                }
             } else if isLoading {
                 VStack(spacing: 12) {
                     ProgressView()
@@ -177,9 +203,14 @@ struct PhotoViewerView: View {
                 .transition(.opacity.combined(with: .scale(scale: 0.9)))
             }
         }
-        .frame(minWidth: 960, minHeight: 720)
+        .frame(minWidth: 320, minHeight: 240)
+        .background(WindowAccessor { win in
+            if window !== win { window = win }
+            applyWindowSize()
+        })
         .navigationTitle(url.lastPathComponent)
         .focusable()
+        .focusEffectDisabled()
         .focused($isFocused)
         // ESC で閉じる
         .onKeyPress(.escape) {
@@ -218,7 +249,54 @@ struct PhotoViewerView: View {
             currentColorLabel = XMPService.readColorLabel(xmpURL: url.deletingPathExtension().appendingPathExtension("xmp"))
             image = await ThumbnailService.fullPreview(for: url)
             isLoading = false
+            applyWindowSize()   // ピクセル等倍は画像サイズ確定後に適用
         }
+    }
+
+    // MARK: - ウィンドウサイズ
+
+    private func applyWindowSize() {
+        guard let window, !didApplySize else { return }
+        let screen = window.screen ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { return }
+
+        switch sizeMode {
+        case .normal:
+            didApplySize = true
+            let size = NSSize(width: min(960, visible.width),
+                              height: min(720, visible.height))
+            window.setContentSize(size)
+            window.center()
+        case .fit:
+            didApplySize = true
+            window.setFrame(visible, display: true)
+        case .pixel:
+            // 画像の実ピクセルサイズが必要なので、画像読み込み後に適用する
+            guard let img = image else { return }
+            didApplySize = true
+            let px = pixelSize(of: img)
+            let w = min(px.width, visible.width)
+            let h = min(px.height, visible.height)
+            window.setContentSize(NSSize(width: w, height: h))
+            window.center()
+        }
+    }
+
+    /// パン位置を画像が画面外に行き過ぎないようにクランプ（中央基準）
+    private func clampedOffset(_ proposed: CGSize, dispSize: CGSize, viewport: CGSize) -> CGSize {
+        let maxX = max(0, (dispSize.width  - viewport.width)  / 2)
+        let maxY = max(0, (dispSize.height - viewport.height) / 2)
+        return CGSize(
+            width:  min(max(proposed.width,  -maxX), maxX),
+            height: min(max(proposed.height, -maxY), maxY)
+        )
+    }
+
+    private func pixelSize(of img: NSImage) -> CGSize {
+        for rep in img.representations where rep.pixelsWide > 0 && rep.pixelsHigh > 0 {
+            return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+        }
+        return img.size
     }
 
     // MARK: - Actions
@@ -287,6 +365,26 @@ struct PhotoViewerView: View {
                 object: nil,
                 userInfo: ["url": url, "rating": newRating as Any]
             )
+        }
+    }
+}
+
+// MARK: - WindowAccessor（ホスト中の NSWindow を取得）
+
+private struct WindowAccessor: NSViewRepresentable {
+    let onResolve: (NSWindow) -> Void
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView()
+        DispatchQueue.main.async {
+            if let w = view.window { onResolve(w) }
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            if let w = nsView.window { onResolve(w) }
         }
     }
 }

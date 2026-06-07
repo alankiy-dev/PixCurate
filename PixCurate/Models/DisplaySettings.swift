@@ -116,6 +116,14 @@ final class DisplaySettings {
     }
     var thumbnailGrouping: ThumbnailGrouping = .combined
 
+    // MARK: - 拡大表示（ダブルクリック）のサイズ
+    enum ViewerSize: String, CaseIterable, Codable {
+        case normal = "通常"
+        case fit    = "画面に合わせる"
+        case pixel  = "ピクセル等倍"
+    }
+    var viewerSize: ViewerSize = .fit
+
     // MARK: - Overlay badges (on thumbnail)
     var showRating: Bool   = true
     var showTags: Bool     = true
@@ -175,6 +183,7 @@ final class DisplaySettings {
         static let listColumns     = "ds.listColumns"
         static let gridBackground  = "ds.gridBackground"
         static let thumbnailGrouping = "ds.thumbnailGrouping"
+        static let viewerSize        = "ds.viewerSize"
     }
 
     init() { load() }
@@ -191,6 +200,7 @@ final class DisplaySettings {
         viewMode        = ViewMode(rawValue:  d.string(forKey: K.viewMode)  ?? "") ?? .grid
         gridBackground  = GridBackground(rawValue: d.string(forKey: K.gridBackground) ?? "") ?? .system
         thumbnailGrouping = ThumbnailGrouping(rawValue: d.string(forKey: K.thumbnailGrouping) ?? "") ?? .combined
+        viewerSize        = ViewerSize(rawValue: d.string(forKey: K.viewerSize) ?? "") ?? .fit
         if let str = d.string(forKey: K.listColumns) {
             listColumns = Set(str.split(separator: ",").compactMap { ListColumn(rawValue: String($0)) })
         }
@@ -208,6 +218,15 @@ final class DisplaySettings {
         d.set(viewMode.rawValue,       forKey: K.viewMode)
         d.set(gridBackground.rawValue, forKey: K.gridBackground)
         d.set(thumbnailGrouping.rawValue, forKey: K.thumbnailGrouping)
+        d.set(viewerSize.rawValue,        forKey: K.viewerSize)
         d.set(listColumns.map(\.rawValue).joined(separator: ","), forKey: K.listColumns)
     }
+}
+
+// MARK: - PhotoViewerRequest（拡大表示ウィンドウへ渡す情報）
+
+struct PhotoViewerRequest: Hashable, Codable {
+    let url: URL
+    /// nil の場合は表示設定のデフォルト（DisplaySettings.viewerSize）に従う
+    var size: DisplaySettings.ViewerSize? = nil
 }

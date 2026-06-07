@@ -2362,7 +2362,7 @@ struct ContentView: View {
                     if !selection.isEmpty {
                         Button {
                             if let file = vm.filteredFiles.first(where: { selection.contains($0.id) }) {
-                                openWindow(id: "photo-viewer", value: file.rawURL)
+                                openWindow(id: "photo-viewer", value: PhotoViewerRequest(url: file.rawURL))
                             }
                         } label: {
                             Image(systemName: "arrow.up.left.and.arrow.down.right")

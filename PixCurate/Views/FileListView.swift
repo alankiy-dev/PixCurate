@@ -62,7 +62,7 @@ struct FileListView: View {
                             .id(file.id)
                             .onTapGesture(count: 2) {
                                 selection = [file.id]
-                                openWindow(id: "photo-viewer", value: file.rawURL)
+                                openViewer(file, nil)
                             }
                             .onTapGesture {
                                 handleTap(file)
@@ -122,7 +122,7 @@ struct FileListView: View {
                             .padding(.horizontal, ListLayout.rowHPad)
                             .contentShape(Rectangle())
                             .onTapGesture(count: 2) {
-                                openWindow(id: "photo-viewer", value: file.rawURL)
+                                openViewer(file, nil)
                             }
                             .onTapGesture { handleTap(file) }
                             .contextMenu { cellContextMenu(for: file) }
@@ -192,6 +192,13 @@ struct FileListView: View {
         .onTapGesture { onSort(column) }
     }
 
+    // MARK: - 拡大表示
+
+    /// size が nil の場合は表示設定のデフォルトサイズで開く
+    private func openViewer(_ file: PhotoFile, _ size: DisplaySettings.ViewerSize?) {
+        openWindow(id: "photo-viewer", value: PhotoViewerRequest(url: file.rawURL, size: size))
+    }
+
     // MARK: - Shared context menu
 
     @ViewBuilder
@@ -199,8 +206,14 @@ struct FileListView: View {
         Button { exifTarget = file } label: {
             Label("情報を表示", systemImage: "info.circle")
         }
-        Button { openWindow(id: "photo-viewer", value: file.rawURL) } label: {
-            Label("大きく表示", systemImage: "arrow.up.left.and.arrow.down.right")
+        Button { openViewer(file, .normal) } label: {
+            Label("通常サイズで表示", systemImage: "macwindow")
+        }
+        Button { openViewer(file, .fit) } label: {
+            Label("画面に合わせて表示", systemImage: "arrow.up.left.and.arrow.down.right")
+        }
+        Button { openViewer(file, .pixel) } label: {
+            Label("ピクセル等倍で表示", systemImage: "1.magnifyingglass")
         }
         Button {
             NSWorkspace.shared.activateFileViewerSelecting([file.rawURL])
