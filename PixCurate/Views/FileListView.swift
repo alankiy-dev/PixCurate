@@ -246,9 +246,7 @@ struct FileListView: View {
         // コレクション操作
         let targets = contextTargets(for: file)
         Menu("コレクションに追加") {
-            ForEach(collections) { col in
-                Button(col.name) { onAddToCollection(col, targets) }
-            }
+            collectionMenuItems(parent: nil, targets: targets)
             if !collections.isEmpty { Divider() }
             Button("新規コレクションを作成して追加…") { onCreateAndAdd(targets) }
         }
@@ -257,6 +255,23 @@ struct FileListView: View {
                 Label("このコレクションから削除", systemImage: "minus.circle")
             }
         }
+    }
+
+    /// コレクション階層をネストしたサブメニューとして表示（グループ=サブメニュー、葉=追加ボタン）
+    /// 再帰のため AnyView で型を消去する
+    private func collectionMenuItems(parent: UUID?, targets: [PhotoFile]) -> AnyView {
+        let children = collections
+            .filter { $0.parentId == parent }
+            .sorted { $0.createdAt < $1.createdAt }
+        return AnyView(
+            ForEach(children) { col in
+                if collections.contains(where: { $0.parentId == col.id }) {
+                    Menu(col.name) { collectionMenuItems(parent: col.id, targets: targets) }
+                } else {
+                    Button(col.name) { onAddToCollection(col, targets) }
+                }
+            }
+        )
     }
 
     // 右クリックされたファイルが選択中なら選択全体、そうでなければそのファイルのみ
@@ -366,6 +381,7 @@ struct PhotoCell: View {
     let isSelected: Bool
 
     @State private var thumbnail: NSImage?
+    @State private var thumbnailFailed = false
     @Environment(LocationStore.self) var locationStore
     @Environment(DisplaySettings.self) var settings
 
@@ -388,6 +404,10 @@ struct PhotoCell: View {
                         .aspectRatio(contentMode: .fit)
                         .frame(width: w, height: h)
                         .clipShape(RoundedRectangle(cornerRadius: 6))
+                } else if thumbnailFailed {
+                    Image(systemName: "photo")
+                        .font(.system(size: 26))
+                        .foregroundStyle(.secondary)
                 } else {
                     ProgressView()
                         .scaleEffect(0.7)
@@ -486,7 +506,10 @@ struct PhotoCell: View {
         }
         .task(id: file.rawURL) {
             guard !file.isOffline else { return }
-            thumbnail = await ThumbnailService.thumbnail(for: file.rawURL)
+            thumbnailFailed = false
+            let img = await ThumbnailService.thumbnail(for: file.rawURL)
+            thumbnail = img
+            thumbnailFailed = (img == nil)
         }
     }
 

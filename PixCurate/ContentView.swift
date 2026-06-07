@@ -243,6 +243,8 @@ class FileListViewModel {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                // コレクション表示に切り替わっていたらビューを上書きしない
+                guard !isCollectionMode else { return }
                 if hasCached {
                     allFiles = cached
                     applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
@@ -257,10 +259,12 @@ class FileListViewModel {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                isIndexing = false
+                // コレクション表示中はスキャン結果でビューを上書きしない（DBには反映済み）
+                guard !isCollectionMode else { return }
                 allFiles = files
                 applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isLoading = false
-                isIndexing = false
                 indexStatus = "DB: \(files.count)件"
                 if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
                     let parts = [
@@ -297,6 +301,7 @@ class FileListViewModel {
             let cached = IndexService.loadFromDB(sources: sources)
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                guard !isCollectionMode else { return }
                 allFiles = cached
                 applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
                 isLoading = false
@@ -318,9 +323,10 @@ class FileListViewModel {
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                isIndexing = false
+                guard !isCollectionMode else { return }
                 allFiles = merged
                 applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
-                isIndexing = false
                 indexStatus = "DB: \(merged.count)件"
                 if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
                     let parts = [
@@ -346,9 +352,10 @@ class FileListViewModel {
             let (files, result) = IndexService.fullScan(sources: sources)
             await MainActor.run { [weak self] in
                 guard let self else { return }
+                isIndexing = false
+                guard !isCollectionMode else { return }
                 allFiles = files
                 applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
-                isIndexing = false
                 indexStatus = "DB: \(files.count)件（新規\(result.added) 更新\(result.updated) 削除\(result.removed)）"
             }
         }
@@ -395,6 +402,9 @@ class FileListViewModel {
         allFiles = []
         filteredFiles = []
         indexStatus = "\(collection.name) 読み込み中…"
+
+        // 過去のコレクション不具合等で失敗キャッシュに入ったURLを再試行できるようにする
+        Task { await ThumbnailService.resetFailedURLs() }
 
         Task.detached {
             let files = CollectionStore.shared.loadFiles(in: collection)
@@ -727,6 +737,8 @@ struct ContentView: View {
     @State private var activeCollection: PhotoCollection?
     @State private var showNewCollection = false
     @State private var newCollectionName = ""
+    @State private var newCollectionParent: UUID? = nil
+    @State private var expandedCollectionGroups: Set<UUID> = []
     @State private var pendingCollectionFiles: [PhotoFile] = []
     @State private var editingCollection: PhotoCollection?
     @State private var editingCollectionName = ""
@@ -756,6 +768,9 @@ struct ContentView: View {
             loadTabFiltersFromDefaults()
         }
         .task {
+            // コレクション用フォルダの security-scoped bookmark を解決してアクセス開始。
+            // コピー元構成に依存せず、コレクションの実ファイルを読めるようにする。
+            Task.detached { CollectionAccessStore.shared.resolveAndStartAccessing() }
             // コピー先ブックマークをバックグラウンドで解決し、メインスレッドをブロックしない
             let dstTask = Task.detached { BookmarkStore.restore(Keys.dstPath) }
             let dst = await dstTask.value
@@ -855,13 +870,19 @@ struct ContentView: View {
             Button("作成") {
                 let name = newCollectionName.trimmingCharacters(in: .whitespaces)
                 guard !name.isEmpty else { return }
-                let col = collectionStore.add(name: name)
+                let col = collectionStore.add(name: name, parentId: newCollectionParent)
+                if let pid = newCollectionParent { expandedCollectionGroups.insert(pid) }
                 if !pendingCollectionFiles.isEmpty {
                     collectionStore.addFiles(pendingCollectionFiles, to: col)
                     pendingCollectionFiles = []
                 }
+                newCollectionParent = nil
             }
-        } message: { Text("名前を入力してください") }
+        } message: {
+            Text(newCollectionParent == nil
+                 ? "名前を入力してください"
+                 : "「\(collectionStore.collections.first(where: { $0.id == newCollectionParent })?.name ?? "")」の中に作成します")
+        }
         .alert("コレクション名の変更", isPresented: Binding<Bool>(
             get: { editingCollection != nil },
             set: { if !$0 { editingCollection = nil } }
@@ -895,7 +916,11 @@ struct ContentView: View {
             }
         } message: {
             if let col = deleteConfirmCollection {
-                Text("「\(col.name)」を削除します。この操作は元に戻せません。")
+                if collectionStore.hasChildren(col.id) {
+                    Text("グループ「\(col.name)」と、その中のすべてのコレクションを削除します。この操作は元に戻せません。")
+                } else {
+                    Text("「\(col.name)」を削除します。この操作は元に戻せません。")
+                }
             }
         }
         .alert("プリセットを削除", isPresented: Binding<Bool>(
@@ -1255,13 +1280,14 @@ struct ContentView: View {
                         AnyView(
                             Button {
                                 newCollectionName = ""
+                                newCollectionParent = nil
                                 pendingCollectionFiles = []
                                 showNewCollection = true
                             } label: {
                                 Image(systemName: "plus").font(.caption)
                             }
                             .buttonStyle(.borderless)
-                            .help("新規コレクション")
+                            .help("新規コレクション / グループ")
                         )
                     })
                 }
@@ -1315,65 +1341,130 @@ struct ContentView: View {
     @ViewBuilder
     private var collectionSection: some View {
         if collectionExpanded {
-        if collectionStore.collections.isEmpty {
-            Text("コレクションなし")
-                .font(.callout)
-                .foregroundStyle(.secondary)
-        } else {
-            ForEach(collectionStore.collections) { col in
-                let isActive = activeCollection?.id == col.id
-                HStack(spacing: 6) {
-                    Button {
-                        if isActive {
-                            activeCollection = nil
-                            vm.exitCollectionMode(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
-                        } else {
-                            activeCollection = col
-                            vm.loadCollection(col, minRating: minRating)
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Image(systemName: isActive
-                                  ? "rectangle.stack.fill"
-                                  : "rectangle.stack")
-                                .foregroundStyle(isActive ? Color.accentColor : .secondary)
-                                .font(.callout)
-                            Text(col.name)
-                                .font(.callout)
-                                .fontWeight(isActive ? .semibold : .regular)
-                            Spacer()
-                            Text("\(col.fileCount)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-
-                    Button {
-                        editingCollection = col
-                        editingCollectionName = col.name
-                    } label: {
-                        Image(systemName: "square.and.pencil").font(.callout)
-                    }
-                    .buttonStyle(.borderless)
-
-                    Button(role: .destructive) {
-                        deleteConfirmCollection = col
-                    } label: {
-                        Image(systemName: "trash")
-                            .font(.callout)
-                            .foregroundStyle(.red)
-                    }
-                    .buttonStyle(.borderless)
-                }
-                .padding(.vertical, SidebarLayout.itemVPad)
-                .padding(.horizontal, SidebarLayout.itemHPad)
-                .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
-                .clipShape(RoundedRectangle(cornerRadius: 6))
+            if collectionStore.collections.isEmpty {
+                Text("コレクションなし")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            } else {
+                collectionTree(parent: nil, depth: 0)
             }
         }
+    }
+
+    /// コレクションを親子構造でツリー表示（再帰）
+    /// 再帰のため AnyView で型を消去する
+    private func collectionTree(parent: UUID?, depth: Int) -> AnyView {
+        AnyView(
+            ForEach(collectionStore.children(of: parent)) { col in
+                collectionRow(col, depth: depth)
+                if collectionStore.hasChildren(col.id),
+                   expandedCollectionGroups.contains(col.id) {
+                    collectionTree(parent: col.id, depth: depth + 1)
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func collectionRow(_ col: PhotoCollection, depth: Int) -> some View {
+        let isActive = activeCollection?.id == col.id
+        let isGroup = collectionStore.hasChildren(col.id)
+        let isExpanded = expandedCollectionGroups.contains(col.id)
+
+        HStack(spacing: 4) {
+            // インデント
+            if depth > 0 {
+                Spacer().frame(width: CGFloat(depth) * 14)
+            }
+
+            // 開閉シェブロン（グループのみ）
+            Button {
+                if isExpanded { expandedCollectionGroups.remove(col.id) }
+                else { expandedCollectionGroups.insert(col.id) }
+            } label: {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                    .frame(width: 12)
+            }
+            .buttonStyle(.plain)
+            .opacity(isGroup ? 1 : 0)
+            .disabled(!isGroup)
+
+            // 本体（グループ=開閉、コレクション=読み込み）
+            Button {
+                if isGroup {
+                    if isExpanded { expandedCollectionGroups.remove(col.id) }
+                    else { expandedCollectionGroups.insert(col.id) }
+                } else if isActive {
+                    activeCollection = nil
+                    vm.exitCollectionMode(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
+                } else {
+                    activeCollection = col
+                    // 現在のサイドバーのフィルター条件を VM に同期してから読み込む
+                    // （コレクション内の画像 かつ フィルター条件 で絞り込む）
+                    applyFilterStateToVM()
+                    vm.loadCollection(col, minRating: minRating)
+                }
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: collectionIcon(isGroup: isGroup, isActive: isActive))
+                        .foregroundStyle(isActive ? Color.accentColor : .secondary)
+                        .font(.callout)
+                    Text(col.name)
+                        .font(.callout)
+                        .fontWeight(isActive ? .semibold : .regular)
+                        .lineLimit(1)
+                    Spacer()
+                    if !isGroup {
+                        Text("\(col.fileCount)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            // 子を追加（グループ化）
+            Button {
+                newCollectionName = ""
+                newCollectionParent = col.id
+                pendingCollectionFiles = []
+                showNewCollection = true
+            } label: {
+                Image(systemName: "plus.circle").font(.caption)
+            }
+            .buttonStyle(.borderless)
+            .help("この中に新規コレクション/グループ")
+
+            Button {
+                editingCollection = col
+                editingCollectionName = col.name
+            } label: {
+                Image(systemName: "square.and.pencil").font(.callout)
+            }
+            .buttonStyle(.borderless)
+
+            Button(role: .destructive) {
+                deleteConfirmCollection = col
+            } label: {
+                Image(systemName: "trash")
+                    .font(.callout)
+                    .foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
         }
+        .padding(.vertical, SidebarLayout.itemVPad)
+        .padding(.horizontal, SidebarLayout.itemHPad)
+        .background(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func collectionIcon(isGroup: Bool, isActive: Bool) -> String {
+        if isGroup { return "folder" }
+        return isActive ? "rectangle.stack.fill" : "rectangle.stack"
     }
 
     // MARK: - Color label filter UI
@@ -1884,6 +1975,7 @@ struct ContentView: View {
         vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
         vm.locationFilter = selectedLocationIds
         vm.filterGroups = filterGroups.map { Array($0.tagNames) }
+        vm.colorLabelFilter = selectedColorLabels
         vm.fileTypeFilter = fileTypeFilter
         vm.ratingFilterMode = ratingFilterMode
         switch dateFilterMode {
@@ -2238,6 +2330,23 @@ struct ContentView: View {
             VStack(spacing: 0) {
                 // ステータスバー
                 HStack(spacing: 6) {
+                    // コレクション表示中のみ：通常表示に戻るボタン
+                    if vm.isCollectionMode {
+                        Button {
+                            activeCollection = nil
+                            vm.exitCollectionMode(sources: sourceFolderStore.onlineSpecs,
+                                                  minRating: minRating)
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "xmark.circle.fill")
+                                Text(activeCollection.map { "「\($0.name)」を閉じる" } ?? "コレクションを閉じる")
+                            }
+                            .font(.caption)
+                        }
+                        .buttonStyle(.borderless)
+                        .help("通常表示（コピー元フォルダ）に戻る")
+                        Divider().frame(height: 14)
+                    }
                     if vm.isLoading {
                         ProgressView().scaleEffect(0.65)
                         Text("読み込み中...").font(.caption).foregroundStyle(.secondary)

@@ -12,9 +12,15 @@ final class DatabaseService: @unchecked Sendable {
     private var db: OpaquePointer?
     private let queue = DispatchQueue(label: "pixcurate.db", qos: .userInitiated)
 
+    // 読み取り専用の別コネクション。WALモードにより、書き込み中のスキャンと
+    // 並行してコレクション等の読み取りを実行でき、待たされない。
+    private var readDB: OpaquePointer?
+    private let readQueue = DispatchQueue(label: "pixcurate.db.read", qos: .userInitiated)
+
     private init() {
         openDatabase()
         createTables()
+        openReadConnection()
     }
 
     // MARK: - Setup
@@ -33,6 +39,19 @@ final class DatabaseService: @unchecked Sendable {
         }
         exec("PRAGMA journal_mode=WAL;")
         exec("PRAGMA synchronous=NORMAL;")
+    }
+
+    /// 読み取り用の別コネクションを開く。
+    /// WALモードのDBはREADONLYだと-shm共有メモリへ書き込めず読めないため、
+    /// READWRITEで開く（実際の用途は読み取りのみ）。別コネクションなので
+    /// 書き込み中のスキャンと並行して読め、直列キューで待たされない。
+    private func openReadConnection() {
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
+        if sqlite3_open_v2(dbURL.path, &readDB, flags, nil) != SQLITE_OK {
+            print("DB read open error: \(String(cString: sqlite3_errmsg(readDB)))")
+        }
+        // 書き込みロックに当たった場合に少し待ってリトライ
+        sqlite3_busy_timeout(readDB, 5000)
     }
 
     private func createTables() {
@@ -81,6 +100,13 @@ final class DatabaseService: @unchecked Sendable {
                 PRIMARY KEY (collection_id, file_path)
             );
         """)
+        // マイグレーション: collections に parent_id を追加（階層化）
+        var colCheck: OpaquePointer?
+        let parentExists = sqlite3_prepare_v2(db, "SELECT parent_id FROM collections LIMIT 0;", -1, &colCheck, nil) == SQLITE_OK
+        sqlite3_finalize(colCheck)
+        if !parentExists {
+            exec("ALTER TABLE collections ADD COLUMN parent_id TEXT;")
+        }
         exec("PRAGMA foreign_keys = ON;")
     }
 
@@ -222,7 +248,8 @@ final class DatabaseService: @unchecked Sendable {
     // MARK: - Collections
 
     struct CollectionRow: Sendable {
-        let id: String; let name: String; let createdAt: String; let fileCount: Int
+        let id: String; let name: String; let createdAt: String
+        let fileCount: Int; let parentId: String?
     }
 
     nonisolated func loadCollections() -> [CollectionRow] {
@@ -230,7 +257,7 @@ final class DatabaseService: @unchecked Sendable {
             var rows: [CollectionRow] = []
             let sql = """
                 SELECT c.id, c.name, c.created_at,
-                       COUNT(cf.file_path) AS file_count
+                       COUNT(cf.file_path) AS file_count, c.parent_id
                 FROM collections c
                 LEFT JOIN collection_files cf ON cf.collection_id = c.id
                 GROUP BY c.id ORDER BY c.created_at;
@@ -242,7 +269,8 @@ final class DatabaseService: @unchecked Sendable {
                         id:        String(cString: sqlite3_column_text(stmt, 0)),
                         name:      String(cString: sqlite3_column_text(stmt, 1)),
                         createdAt: String(cString: sqlite3_column_text(stmt, 2)),
-                        fileCount: Int(sqlite3_column_int(stmt, 3))
+                        fileCount: Int(sqlite3_column_int(stmt, 3)),
+                        parentId:  sqlite3_column_text(stmt, 4).map { String(cString: $0) }
                     ))
                 }
             }
@@ -251,10 +279,17 @@ final class DatabaseService: @unchecked Sendable {
         }
     }
 
-    nonisolated func insertCollection(id: String, name: String) {
+    nonisolated func insertCollection(id: String, name: String, parentId: String? = nil) {
         queue.sync {
-            exec("INSERT INTO collections(id, name, created_at) VALUES (?,?,?);",
-                 bindings: [id, name, iso(Date())])
+            exec("INSERT INTO collections(id, name, created_at, parent_id) VALUES (?,?,?,?);",
+                 bindings: [id, name, iso(Date()), parentId])
+        }
+    }
+
+    nonisolated func setCollectionParent(id: String, parentId: String?) {
+        queue.sync {
+            exec("UPDATE collections SET parent_id = ? WHERE id = ?;",
+                 bindings: [parentId, id])
         }
     }
 
@@ -286,10 +321,10 @@ final class DatabaseService: @unchecked Sendable {
     }
 
     nonisolated func filePathsInCollection(_ collectionId: String) -> Set<String> {
-        queue.sync {
+        readQueue.sync {
             var result = Set<String>()
             var stmt: OpaquePointer?
-            if sqlite3_prepare_v2(db, "SELECT file_path FROM collection_files WHERE collection_id = ?;",
+            if sqlite3_prepare_v2(readDB, "SELECT file_path FROM collection_files WHERE collection_id = ?;",
                                   -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(stmt, 1, collectionId, -1, SQLITE_TRANSIENT_FN)
                 while sqlite3_step(stmt) == SQLITE_ROW {
@@ -302,10 +337,10 @@ final class DatabaseService: @unchecked Sendable {
     }
 
     nonisolated func fileCountInCollection(_ collectionId: String) -> Int {
-        queue.sync {
+        readQueue.sync {
             var stmt: OpaquePointer?
             var count = 0
-            if sqlite3_prepare_v2(db,
+            if sqlite3_prepare_v2(readDB,
                 "SELECT COUNT(*) FROM collection_files WHERE collection_id = ?;",
                 -1, &stmt, nil) == SQLITE_OK {
                 sqlite3_bind_text(stmt, 1, collectionId, -1, SQLITE_TRANSIENT_FN)
@@ -318,7 +353,7 @@ final class DatabaseService: @unchecked Sendable {
 
     nonisolated func loadFiles(paths: Set<String>) -> [DBFileRow] {
         guard !paths.isEmpty else { return [] }
-        return queue.sync {
+        return readQueue.sync {
             var rows: [DBFileRow] = []
             let sql = """
                 SELECT f.file_path, f.file_name, f.shot_date, f.rating,
@@ -332,7 +367,7 @@ final class DatabaseService: @unchecked Sendable {
             """
             for path in paths {
                 var stmt: OpaquePointer?
-                if sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK {
+                if sqlite3_prepare_v2(readDB, sql, -1, &stmt, nil) == SQLITE_OK {
                     sqlite3_bind_text(stmt, 1, path, -1, SQLITE_TRANSIENT_FN)
                     if sqlite3_step(stmt) == SQLITE_ROW { rows.append(DBFileRow(stmt: stmt!)) }
                 }
