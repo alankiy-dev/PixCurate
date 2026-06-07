@@ -13,11 +13,12 @@ struct CopyService: Sendable {
     nonisolated init() {}
 
     /// フィルター済みファイルをコピーする。ログはクロージャで逐次通知する
+    /// - sources: 複数コピー元フォルダ。keepStructure=true のときに最適なベースURLを自動選択する。
     nonisolated func copy(
         files: [PhotoFile],
         to dst: URL,
         keepStructure: Bool,
-        baseURL: URL,
+        sources: [SourceSpec],
         dryRun: Bool,
         log: @Sendable (String) -> Void,
         onProgress: (@Sendable (Int) -> Void)? = nil
@@ -28,7 +29,8 @@ struct CopyService: Sendable {
 
         for file in files {
             let dstRaw: URL
-            if keepStructure, let rel = relativePath(of: file.rawURL, from: baseURL) {
+            if keepStructure, let base = findBase(for: file.rawURL, sources: sources),
+               let rel = relativePath(of: file.rawURL, from: base) {
                 dstRaw = dst.appendingPathComponent(rel)
             } else {
                 dstRaw = dst.appendingPathComponent(file.filename)
@@ -94,6 +96,21 @@ struct CopyService: Sendable {
 
     private nonisolated func modTime(_ url: URL) -> Date? {
         (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date
+    }
+
+    /// sources の中からファイルに最も近い（最長プレフィックスの）ソースURLを返す
+    private nonisolated func findBase(for url: URL, sources: [SourceSpec]) -> URL? {
+        let filePath = url.resolvingSymlinksInPath().path
+        var best: (URL, Int)? = nil
+        for spec in sources {
+            let basePath = spec.url.resolvingSymlinksInPath().path
+            let baseWithSlash = basePath.hasSuffix("/") ? basePath : basePath + "/"
+            if filePath.hasPrefix(baseWithSlash) {
+                let len = baseWithSlash.count
+                if best == nil || len > best!.1 { best = (spec.url, len) }
+            }
+        }
+        return best?.0
     }
 
     private nonisolated func relativePath(of url: URL, from base: URL) -> String? {

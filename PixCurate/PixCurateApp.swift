@@ -95,6 +95,7 @@ struct PixCurateApp: App {
                 .environment(DisplaySettings.shared)
                 .environment(FilterPresetStore.shared)
                 .environment(CollectionStore.shared)
+                .environment(SourceFolderStore.shared)
                 .sheet(isPresented: $showAbout) { AboutView() }
                 .sheet(isPresented: $showHelp) {
                     HelpView()

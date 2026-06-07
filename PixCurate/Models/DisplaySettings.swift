@@ -109,6 +109,13 @@ final class DisplaySettings {
     }
     var viewMode: ViewMode = .grid
 
+    // MARK: - サムネイルのフォルダ別タブ表示
+    enum ThumbnailGrouping: String, CaseIterable {
+        case combined = "まとめて"
+        case byFolder = "フォルダ別"
+    }
+    var thumbnailGrouping: ThumbnailGrouping = .combined
+
     // MARK: - Overlay badges (on thumbnail)
     var showRating: Bool   = true
     var showTags: Bool     = true
@@ -167,6 +174,7 @@ final class DisplaySettings {
         static let viewMode        = "ds.viewMode"
         static let listColumns     = "ds.listColumns"
         static let gridBackground  = "ds.gridBackground"
+        static let thumbnailGrouping = "ds.thumbnailGrouping"
     }
 
     init() { load() }
@@ -182,6 +190,7 @@ final class DisplaySettings {
         badgeFont       = BadgeFont(rawValue: d.string(forKey: K.badgeFont) ?? "") ?? .small
         viewMode        = ViewMode(rawValue:  d.string(forKey: K.viewMode)  ?? "") ?? .grid
         gridBackground  = GridBackground(rawValue: d.string(forKey: K.gridBackground) ?? "") ?? .system
+        thumbnailGrouping = ThumbnailGrouping(rawValue: d.string(forKey: K.thumbnailGrouping) ?? "") ?? .combined
         if let str = d.string(forKey: K.listColumns) {
             listColumns = Set(str.split(separator: ",").compactMap { ListColumn(rawValue: String($0)) })
         }
@@ -198,6 +207,7 @@ final class DisplaySettings {
         d.set(badgeFont.rawValue,      forKey: K.badgeFont)
         d.set(viewMode.rawValue,       forKey: K.viewMode)
         d.set(gridBackground.rawValue, forKey: K.gridBackground)
+        d.set(thumbnailGrouping.rawValue, forKey: K.thumbnailGrouping)
         d.set(listColumns.map(\.rawValue).joined(separator: ","), forKey: K.listColumns)
     }
 }

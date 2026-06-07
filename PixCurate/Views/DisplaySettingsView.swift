@@ -36,6 +36,20 @@ struct DisplaySettingsView: View {
 
             Divider()
 
+            // フォルダ別タブ表示
+            Text("フォルダ表示").font(.caption).foregroundStyle(.secondary)
+            Picker("", selection: $s.thumbnailGrouping) {
+                ForEach(DisplaySettings.ThumbnailGrouping.allCases, id: \.self) { g in
+                    Text(g.rawValue).tag(g)
+                }
+            }
+            .pickerStyle(.segmented)
+            .onChange(of: s.thumbnailGrouping) { _, _ in s.save() }
+            Text("「フォルダ別」はコピー元フォルダごとにタブで表示します。")
+                .font(.caption2).foregroundStyle(.tertiary)
+
+            Divider()
+
             if s.viewMode == .grid {
                 // グリッド設定
                 Text("サムネイルサイズ").font(.caption).foregroundStyle(.secondary)

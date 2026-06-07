@@ -34,7 +34,6 @@ private extension Date {
 // MARK: - UserDefaults keys
 
 private enum Keys {
-    static let srcPath                  = "pixcurate.srcPath"
     static let dstPath                  = "pixcurate.dstPath"
     static let minRating                = "pixcurate.minRating"
     static let keepStructure            = "pixcurate.keepStructure"
@@ -51,6 +50,7 @@ private enum Keys {
     static let xmpFilterExpanded        = "pixcurate.filter.xmp.expanded"
     static let presetExpanded           = "pixcurate.filter.preset.expanded"
     static let fileTypeFilter           = "pixcurate.fileTypeFilter"
+    static let tabFilters               = "pixcurate.tabFilters"
     static let formatFilterExpanded     = "pixcurate.filter.format.expanded"
     static let folderExpanded           = "pixcurate.folder.expanded"
     static let filterExpanded           = "pixcurate.filter.section.expanded"
@@ -76,6 +76,99 @@ enum DateFilterMode: String {
 enum RatingFilterMode: String {
     case atLeast = "atLeast"   // N星以上
     case exactly = "exactly"   // N星のみ
+}
+
+// MARK: - SourceTab（フォルダ別タブ）
+
+enum SourceTab: Hashable {
+    case all                // すべて（全フォルダまとめ）
+    case folder(UUID)       // SourceFolder.id
+}
+
+// MARK: - TabFilterState（タブごとのフィルター条件スナップショット・案C）
+
+/// フィルター述語に渡す条件一式（タブ別の独立計算に使用）
+struct FilterSpec {
+    var minRating: Int = 0
+    var ratingMode: RatingFilterMode = .atLeast
+    var fileTypeFilter: FileTypeFilter = .rawOnly
+    var colorLabelFilter: Set<ColorLabel> = []
+    var filterGroups: [[String]] = []          // OR-group の配列（AND 連結）
+    var locationFilter: Set<UUID> = []
+    var annualFilterDays: Int? = nil
+    var shotDateFrom: Date? = nil
+    var shotDateTo: Date? = nil
+    var xmpSinceFilter: Date? = nil
+}
+
+/// 1タブ分のフィルター条件をまとめて保持する。タブごとに独立して保持・計算する。
+struct TabFilterState {
+    var minRating: Int
+    var ratingFilterMode: RatingFilterMode
+    var filterGroups: [TagFilterGroup]
+    var selectedColorLabels: Set<ColorLabel>
+    var selectedLocationIds: Set<UUID>
+    var fileTypeFilter: FileTypeFilter
+    var dateFilterMode: DateFilterMode
+    var shotDateFrom: Date
+    var shotDateTo: Date
+    var annualFilterDays: Int
+    var useXmpSince: Bool
+    var xmpSinceDate: Date
+    var activePresetId: UUID?
+}
+
+/// TabFilterState の永続化用 DTO（rawValue/プリミティブのみで Codable）
+struct TabFilterDTO: Codable {
+    var minRating: Int
+    var ratingMode: String
+    var tagGroups: [[String]]
+    var colorLabels: [String]
+    var locationIds: [String]
+    var fileType: String
+    var dateMode: String
+    var shotDateFrom: Date
+    var shotDateTo: Date
+    var annualDays: Int
+    var useXmpSince: Bool
+    var xmpSinceDate: Date
+    var presetId: String?
+
+    init(_ s: TabFilterState) {
+        minRating    = s.minRating
+        ratingMode   = s.ratingFilterMode.rawValue
+        tagGroups    = s.filterGroups.map { Array($0.tagNames) }
+        colorLabels  = s.selectedColorLabels.map { $0.rawValue }
+        locationIds  = s.selectedLocationIds.map { $0.uuidString }
+        fileType     = s.fileTypeFilter.rawValue
+        dateMode     = s.dateFilterMode.rawValue
+        shotDateFrom = s.shotDateFrom
+        shotDateTo   = s.shotDateTo
+        annualDays   = s.annualFilterDays
+        useXmpSince  = s.useXmpSince
+        xmpSinceDate = s.xmpSinceDate
+        presetId     = s.activePresetId?.uuidString
+    }
+
+    var state: TabFilterState {
+        TabFilterState(
+            minRating: minRating,
+            ratingFilterMode: RatingFilterMode(rawValue: ratingMode) ?? .atLeast,
+            filterGroups: tagGroups.map { names in
+                var g = TagFilterGroup(); g.tagNames = Set(names); return g
+            },
+            selectedColorLabels: Set(colorLabels.compactMap { ColorLabel(rawValue: $0) }),
+            selectedLocationIds: Set(locationIds.compactMap { UUID(uuidString: $0) }),
+            fileTypeFilter: FileTypeFilter(rawValue: fileType) ?? .rawOnly,
+            dateFilterMode: DateFilterMode(rawValue: dateMode) ?? .off,
+            shotDateFrom: shotDateFrom,
+            shotDateTo: shotDateTo,
+            annualFilterDays: annualDays,
+            useXmpSince: useXmpSince,
+            xmpSinceDate: xmpSinceDate,
+            activePresetId: presetId.flatMap { UUID(uuidString: $0) }
+        )
+    }
 }
 
 // MARK: - FileTypeFilter
@@ -125,9 +218,18 @@ class FileListViewModel {
     var exiftoolMissing = false
     var ratingFilterMode: RatingFilterMode = .atLeast
 
+    /// 現在 allFiles に読み込まれているソース（差分ロードの判定に使用）
+    var loadedSources: [SourceSpec] = []
+
     // MARK: - Load（DB優先 → 差分スキャン）
 
-    func load(from url: URL, minRating: Int) {
+    func load(sources: [SourceSpec], minRating: Int) {
+        guard !sources.isEmpty else {
+            allFiles = []; filteredFiles = []; indexStatus = ""
+            loadedSources = []
+            return
+        }
+        loadedSources = sources
         isLoading = true
         allFiles = []
         filteredFiles = []
@@ -136,7 +238,7 @@ class FileListViewModel {
 
         Task.detached {
             // 1. DBに既存データがあれば即ロード
-            let cached = IndexService.loadFromDB(folder: url)
+            let cached = IndexService.loadFromDB(sources: sources)
             let hasCached = !cached.isEmpty
 
             await MainActor.run { [weak self] in
@@ -151,7 +253,7 @@ class FileListViewModel {
             }
 
             // 2. バックグラウンドで差分スキャン
-            let (files, scanResult) = IndexService.fullScan(folder: url)
+            let (files, scanResult) = IndexService.fullScan(sources: sources)
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -172,16 +274,76 @@ class FileListViewModel {
         }
     }
 
+    // MARK: - 差分ロード（フォルダの有効/無効切替時）
+
+    /// フォルダ構成が変わったときの軽量ロード。
+    /// - 除外されたフォルダ → スキャンせず DB から再ロード（即時）
+    /// - 新たに加わったフォルダ → そのフォルダだけ差分スキャンしてから全体を DB ロード
+    func loadIncremental(sources: [SourceSpec], newlyAdded: [SourceSpec], minRating: Int) {
+        guard !sources.isEmpty else {
+            allFiles = []; filteredFiles = []; indexStatus = ""
+            loadedSources = []
+            return
+        }
+        loadedSources = sources
+        isLoading = true
+        allFiles = []
+        filteredFiles = []
+        indexStatus = ""
+        Task { await ThumbnailService.resetFailedURLs() }
+
+        Task.detached {
+            // 1. まず全体を DB から即ロード
+            let cached = IndexService.loadFromDB(sources: sources)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                allFiles = cached
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                isLoading = false
+                if newlyAdded.isEmpty {
+                    indexStatus = "DB: \(cached.count)件"
+                } else {
+                    isIndexing = true
+                    indexStatus = "新規フォルダを確認中…"
+                }
+            }
+
+            // 新規フォルダが無ければ（除外のみ）ここで終了。スキャンしない。
+            guard !newlyAdded.isEmpty else { return }
+
+            // 2. 新たに加わったフォルダだけを差分スキャン
+            let (_, scanResult) = IndexService.fullScan(sources: newlyAdded)
+            // 3. スキャン結果を含めて全体を DB から再ロード
+            let merged = IndexService.loadFromDB(sources: sources)
+
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                allFiles = merged
+                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                isIndexing = false
+                indexStatus = "DB: \(merged.count)件"
+                if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
+                    let parts = [
+                        scanResult.added   > 0 ? "新規\(scanResult.added)件"   : nil,
+                        scanResult.updated > 0 ? "更新\(scanResult.updated)件" : nil,
+                        scanResult.removed > 0 ? "削除\(scanResult.removed)件" : nil,
+                    ].compactMap { $0 }.joined(separator: " / ")
+                    indexStatus = "DB: \(merged.count)件（\(parts)）"
+                }
+            }
+        }
+    }
+
     // MARK: - 再スキャン（強制フルスキャン）
 
-    func rescan(from url: URL, minRating: Int) {
-        guard !isIndexing else { return }
+    func rescan(sources: [SourceSpec], minRating: Int) {
+        guard !isIndexing, !sources.isEmpty else { return }
         isIndexing = true
         indexStatus = "再スキャン中…"
         Task { await ThumbnailService.resetFailedURLs() }
 
         Task.detached {
-            let (files, result) = IndexService.fullScan(folder: url)
+            let (files, result) = IndexService.fullScan(sources: sources)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
@@ -194,8 +356,8 @@ class FileListViewModel {
 
     // MARK: - DB再構築（全削除→フルスキャン）
 
-    func rebuildDB(from url: URL, minRating: Int) {
-        guard !isIndexing else { return }
+    func rebuildDB(sources: [SourceSpec], minRating: Int) {
+        guard !isIndexing, !sources.isEmpty else { return }
         isIndexing = true
         isLoading = true
         allFiles = []
@@ -203,8 +365,8 @@ class FileListViewModel {
         indexStatus = "DB再構築中…"
 
         Task.detached {
-            DatabaseService.shared.deleteAll(under: url)
-            let (files, result) = IndexService.fullScan(folder: url)
+            for spec in sources { DatabaseService.shared.deleteAll(under: spec.url) }
+            let (files, result) = IndexService.fullScan(sources: sources)
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
@@ -246,14 +408,12 @@ class FileListViewModel {
         }
     }
 
-    func exitCollectionMode(srcURL: URL?, minRating: Int) {
+    func exitCollectionMode(sources: [SourceSpec], minRating: Int) {
         isCollectionMode = false
-        if let url = srcURL {
-            load(from: url, minRating: minRating)
+        if sources.isEmpty {
+            allFiles = []; filteredFiles = []; indexStatus = ""
         } else {
-            allFiles = []
-            filteredFiles = []
-            indexStatus = ""
+            load(sources: sources, minRating: minRating)
         }
     }
 
@@ -326,52 +486,82 @@ class FileListViewModel {
     // Each inner array = one OR-group; outer array connected by AND
     var filterGroups: [[String]] = []
 
-    func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
+    /// VM の現在のフィルター状態を FilterSpec にまとめる
+    private func currentSpec(minRating: Int, ratingMode: RatingFilterMode) -> FilterSpec {
+        FilterSpec(
+            minRating: minRating,
+            ratingMode: ratingMode,
+            fileTypeFilter: fileTypeFilter,
+            colorLabelFilter: colorLabelFilter,
+            filterGroups: filterGroups,
+            locationFilter: locationFilter,
+            annualFilterDays: annualFilterDays,
+            shotDateFrom: shotDateFrom,
+            shotDateTo: shotDateTo,
+            xmpSinceFilter: xmpSinceFilter
+        )
+    }
+
+    /// 任意のファイル集合を任意のフィルター条件で絞り込む（タブ別計算で使用）
+    func filtered(_ files: [PhotoFile], spec: FilterSpec) -> [PhotoFile] {
         let cal = Calendar.current
-        filteredFiles = allFiles.filter { file in
-            let typeOK: Bool
-            switch fileTypeFilter {
-            case .rawOnly:  typeOK = !file.isJpeg
-            case .jpegOnly: typeOK = file.isJpeg
-            case .both:     typeOK = true
-            }
-            guard typeOK else { return false }
-            let ratingOK: Bool
-            if minRating == 0 {
-                ratingOK = true
-            } else if ratingMode == .exactly {
-                ratingOK = (file.rating ?? 0) == minRating
-            } else {
-                ratingOK = (file.rating ?? 0) >= minRating
-            }
-            let colorLabelOK = colorLabelFilter.isEmpty || (file.colorLabel.map { colorLabelFilter.contains($0) } ?? false)
-            let tagOK = filterGroups.isEmpty || filterGroups.allSatisfy { group in
-                group.isEmpty || group.contains { file.tags.contains($0) }
-            }
-            let locationOK = locationFilter.isEmpty || (file.locationId.map { locationFilter.contains($0) } ?? false)
-            let shotDateOK: Bool
-            if let days = annualFilterDays {
-                // 例年の今頃フィルター：年をまたいで月日の近さで判定
-                guard let shot = file.shotDate else { return false }
-                shotDateOK = Self.isWithinAnnualRange(shot, days: days, cal: cal)
-            } else if shotDateFrom != nil || shotDateTo != nil {
-                guard let shot = file.shotDate else { return false }
-                let shotDay = cal.startOfDay(for: shot)
-                if let from = shotDateFrom, shotDay < cal.startOfDay(for: from) { return false }
-                if let to = shotDateTo, shotDay > cal.startOfDay(for: to) { return false }
-                shotDateOK = true
-            } else {
-                shotDateOK = true
-            }
-            let xmpOK: Bool
-            if let since = xmpSinceFilter {
-                let sinceDay = cal.startOfDay(for: since)
-                xmpOK = file.xmpModifiedAt.map { cal.startOfDay(for: $0) >= sinceDay } ?? false
-            } else {
-                xmpOK = true
-            }
-            return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK
+        return files.filter { Self.matches($0, spec: spec, cal: cal) }
+    }
+
+    /// 任意のファイル集合に対し、条件を満たす件数だけを数える（タブ件数バッジで使用）
+    func count(in files: [PhotoFile], spec: FilterSpec) -> Int {
+        let cal = Calendar.current
+        return files.reduce(0) { Self.matches($1, spec: spec, cal: cal) ? $0 + 1 : $0 }
+    }
+
+    /// 1ファイルがフィルター条件を満たすか（純粋関数）
+    static func matches(_ file: PhotoFile, spec: FilterSpec, cal: Calendar) -> Bool {
+        let typeOK: Bool
+        switch spec.fileTypeFilter {
+        case .rawOnly:  typeOK = !file.isJpeg
+        case .jpegOnly: typeOK = file.isJpeg
+        case .both:     typeOK = true
         }
+        guard typeOK else { return false }
+        let ratingOK: Bool
+        if spec.minRating == 0 {
+            ratingOK = true
+        } else if spec.ratingMode == .exactly {
+            ratingOK = (file.rating ?? 0) == spec.minRating
+        } else {
+            ratingOK = (file.rating ?? 0) >= spec.minRating
+        }
+        let colorLabelOK = spec.colorLabelFilter.isEmpty || (file.colorLabel.map { spec.colorLabelFilter.contains($0) } ?? false)
+        let tagOK = spec.filterGroups.isEmpty || spec.filterGroups.allSatisfy { group in
+            group.isEmpty || group.contains { file.tags.contains($0) }
+        }
+        let locationOK = spec.locationFilter.isEmpty || (file.locationId.map { spec.locationFilter.contains($0) } ?? false)
+        let shotDateOK: Bool
+        if let days = spec.annualFilterDays {
+            // 例年の今頃フィルター：年をまたいで月日の近さで判定
+            guard let shot = file.shotDate else { return false }
+            shotDateOK = isWithinAnnualRange(shot, days: days, cal: cal)
+        } else if spec.shotDateFrom != nil || spec.shotDateTo != nil {
+            guard let shot = file.shotDate else { return false }
+            let shotDay = cal.startOfDay(for: shot)
+            if let from = spec.shotDateFrom, shotDay < cal.startOfDay(for: from) { return false }
+            if let to = spec.shotDateTo, shotDay > cal.startOfDay(for: to) { return false }
+            shotDateOK = true
+        } else {
+            shotDateOK = true
+        }
+        let xmpOK: Bool
+        if let since = spec.xmpSinceFilter {
+            let sinceDay = cal.startOfDay(for: since)
+            xmpOK = file.xmpModifiedAt.map { cal.startOfDay(for: $0) >= sinceDay } ?? false
+        } else {
+            xmpOK = true
+        }
+        return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK
+    }
+
+    func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
+        filteredFiles = filtered(allFiles, spec: currentSpec(minRating: minRating, ratingMode: ratingMode))
         applyListSort()
     }
 
@@ -427,7 +617,7 @@ class FileListViewModel {
         }
     }
 
-    func runCopy(to dst: URL, keepStructure: Bool, baseURL: URL, dryRun: Bool) {
+    func runCopy(to dst: URL, keepStructure: Bool, sources: [SourceSpec], dryRun: Bool) {
         logLines = []
         isRunning = true
         copyTotal = filteredFiles.count
@@ -441,7 +631,7 @@ class FileListViewModel {
                 files: files,
                 to: dst,
                 keepStructure: keepStructure,
-                baseURL: baseURL,
+                sources: sources,
                 dryRun: dryRun,
                 log: { line in
                     Task { @MainActor [weak self] in
@@ -486,8 +676,13 @@ struct ContentView: View {
     @State private var vm = FileListViewModel()
     @Environment(TagStore.self) private var tagStore
 
-    @State private var srcURL: URL? = nil   // 起動後にバックグラウンドで復元（メインスレッドをブロックしない）
-    @State private var dstURL: URL? = nil   // 同上
+    @Environment(SourceFolderStore.self) private var sourceFolderStore
+    @State private var showSourceFolderManager = false
+    @State private var sourcesNeedReload = false   // ダイアログ操作中の再読み込みを閉じたとき1回にまとめる
+    @State private var activeTab: SourceTab = .all
+    @State private var tabFilters: [SourceTab: TabFilterState] = [:]   // タブごとの独立フィルター（案A）
+    @State private var suppressPresetClear = false                     // タブ復元中はプリセット解除を抑止
+    @State private var dstURL: URL? = nil   // 起動後にバックグラウンドで復元（メインスレッドをブロックしない）
     @State private var minRating: Int = UserDefaults.standard.object(forKey: Keys.minRating) as? Int ?? 1
     @State private var keepStructure: Bool = UserDefaults.standard.bool(forKey: Keys.keepStructure)
     @State private var selection: Set<UUID> = []
@@ -551,60 +746,76 @@ struct ContentView: View {
             detailView
         }
         .frame(minWidth: 740, minHeight: 520)
+        .sheet(isPresented: $showSourceFolderManager, onDismiss: handleSourceManagerDismiss) {
+            SourceFolderManagerSheet()
+                .environment(sourceFolderStore)
+        }
         .onAppear {
             columnVisibility = .all
             NotificationService.requestPermission()
+            loadTabFiltersFromDefaults()
         }
         .task {
-            // ブックマーク解決をバックグラウンドで並列実行し、メインスレッドをブロックしない
-            // NAS/SMBが未接続でも起動を遅延させない
-            let srcTask = Task.detached { BookmarkStore.restore(Keys.srcPath) }
+            // コピー先ブックマークをバックグラウンドで解決し、メインスレッドをブロックしない
             let dstTask = Task.detached { BookmarkStore.restore(Keys.dstPath) }
-            let (src, dst) = await (srcTask.value, dstTask.value)
-            // 解決できた分だけ反映（nil = 未設定 or ボリューム未接続 → ブックマークはそのまま保持）
-            if src != nil { srcURL = src }
+            let dst = await dstTask.value
             if dst != nil { dstURL = dst }
         }
         .background(WindowAccessor { window in
             window.setFrameAutosaveName("PixCurateMain")
         })
-        .onChange(of: srcURL, initial: true) { _, newVal in
-            guard let url = newVal else { return }  // nil の場合はブックマークを消さずに無視
-            BookmarkStore.save(url: url, key: Keys.srcPath)
-            vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
-            vm.locationFilter = selectedLocationIds
-            vm.filterGroups = filterGroups.map { Array($0.tagNames) }
-            vm.fileTypeFilter = fileTypeFilter
-            vm.ratingFilterMode = ratingFilterMode
-            switch dateFilterMode {
-            case .off:
-                vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
-            case .annual:
-                vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
-            case .range:
-                vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
+        .onChange(of: sourceFolderStore.onlineSpecs, initial: true) { _, newSpecs in
+            guard !vm.isCollectionMode else { return }
+            // 設定ダイアログ操作中は再読み込みせず、閉じたときにまとめて1回だけ実行する
+            if showSourceFolderManager {
+                sourcesNeedReload = true
+                return
             }
-            vm.load(from: url, minRating: minRating)
+            setupFiltersAndLoad(sources: newSpecs)
         }
         .onChange(of: dstURL) { _, newVal in
             if let url = newVal { BookmarkStore.save(url: url, key: Keys.dstPath) }
         }
+        .onChange(of: sourceFolderStore.folders.map(\.id)) { _, ids in
+            // 削除されたフォルダのタブ別フィルター記憶を破棄
+            let idSet = Set(ids)
+            tabFilters = tabFilters.filter { key, _ in
+                if case .folder(let id) = key { return idSet.contains(id) }
+                return true   // .all は常に保持
+            }
+            saveTabFiltersToDefaults()
+            // 選択中のタブのフォルダが削除されたら「すべて」に戻す
+            if case .folder(let id) = activeTab, !ids.contains(id) {
+                activeTab = .all
+            }
+        }
+        .onChange(of: sourceFolderStore.enabledFolders.map(\.id)) { _, ids in
+            // 選択中のタブのフォルダが無効化されたら「すべて」に戻す
+            if case .folder(let id) = activeTab, !ids.contains(id) {
+                activeTab = .all
+            }
+        }
         .onChange(of: minRating) { _, newVal in
             UserDefaults.standard.set(newVal, forKey: Keys.minRating)
+            if suppressPresetClear { return }
             vm.applyFilter(minRating: newVal, ratingMode: ratingFilterMode)
             clearActivePreset()
+            persistActiveTabFilter()
         }
         .onChange(of: ratingFilterMode) { _, newVal in
             UserDefaults.standard.set(newVal.rawValue, forKey: Keys.ratingFilterMode)
             vm.ratingFilterMode = newVal   // バックグラウンドTaskの内部applyFilterにも反映
+            if suppressPresetClear { return }
             vm.applyFilter(minRating: minRating, ratingMode: newVal)
             clearActivePreset()
+            persistActiveTabFilter()
         }
         .onReceive(NotificationCenter.default.publisher(for: .rescanRequested)) { _ in
-            if let url = srcURL { vm.rescan(from: url, minRating: minRating) }
+            let specs = sourceFolderStore.onlineSpecs
+            if !specs.isEmpty { vm.rescan(sources: specs, minRating: minRating) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .rebuildRequested)) { _ in
-            if srcURL != nil { showRebuildConfirm = true }
+            if !sourceFolderStore.folders.isEmpty { showRebuildConfirm = true }
         }
         .onReceive(NotificationCenter.default.publisher(for: .resetWindowState)) { _ in
             resetWindowState()
@@ -662,7 +873,7 @@ struct ContentView: View {
         .alert("DB再構築の確認", isPresented: $showRebuildConfirm) {
             Button("キャンセル", role: .cancel) {}
             Button("再構築", role: .destructive) {
-                if let url = srcURL { vm.rebuildDB(from: url, minRating: minRating) }
+                vm.rebuildDB(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
             }
         } message: {
             Text("DBを全削除してすべてのファイルを再スキャンします。件数が多い場合は時間がかかります。")
@@ -676,7 +887,7 @@ struct ContentView: View {
                 if let col = deleteConfirmCollection {
                     if activeCollection?.id == col.id {
                         activeCollection = nil
-                        vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
+                        vm.exitCollectionMode(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
                     }
                     collectionStore.delete(col)
                     deleteConfirmCollection = nil
@@ -712,7 +923,8 @@ struct ContentView: View {
             List {
                 Section {
                     if folderExpanded {
-                        FolderPickerRow(label: "コピー元", url: $srcURL)
+                        // コピー元フォルダ（複数設定）
+                        sourceFolderSummaryRow
                             .listRowInsets(SidebarLayout.rowInsets)
                         FolderPickerRow(label: "コピー先", url: $dstURL)
                             .listRowInsets(SidebarLayout.rowInsets)
@@ -736,6 +948,7 @@ struct ContentView: View {
                                     UserDefaults.standard.set(t.rawValue, forKey: Keys.fileTypeFilter)
                                     vm.fileTypeFilter = t
                                     vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                                    persistActiveTabFilter()
                                 } label: {
                                     Text(t.shortLabel)
                                         .font(.system(size: 12, weight: selected ? .semibold : .regular))
@@ -1113,7 +1326,7 @@ struct ContentView: View {
                     Button {
                         if isActive {
                             activeCollection = nil
-                            vm.exitCollectionMode(srcURL: srcURL, minRating: minRating)
+                            vm.exitCollectionMode(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
                         } else {
                             activeCollection = col
                             vm.loadCollection(col, minRating: minRating)
@@ -1302,12 +1515,14 @@ struct ContentView: View {
         vm.filterGroups = filterGroups.map { Array($0.tagNames) }
         vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
+        persistActiveTabFilter()
     }
 
     private func applyLocationFilter(clearPreset: Bool = true) {
         vm.locationFilter = selectedLocationIds
         vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
+        persistActiveTabFilter()
     }
 
     private func applyDateFilter() {
@@ -1327,12 +1542,14 @@ struct ContentView: View {
             vm.shotDateTo   = shotDateTo
         }
         vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+        persistActiveTabFilter()
     }
 
     private func applyXmpFilter(clearPreset: Bool = true) {
         vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
         vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
         if clearPreset { activePresetId = nil }
+        persistActiveTabFilter()
     }
 
     private func clearActivePreset() {
@@ -1354,6 +1571,7 @@ struct ContentView: View {
     private func applyColorLabelFilter() {
         vm.colorLabelFilter = selectedColorLabels
         vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+        persistActiveTabFilter()
     }
 
     private func applyColorLabelToSelection(label: ColorLabel?) {
@@ -1441,7 +1659,7 @@ struct ContentView: View {
                 files: files,
                 to: dst,
                 keepStructure: false,
-                baseURL: dst,
+                sources: [],
                 dryRun: false,
                 log: { line in
                     Task { @MainActor in vm.logLines.append(line) }
@@ -1604,6 +1822,238 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - コピー元フォルダ サマリー行
+
+    private var sourceFolderSummaryRow: some View {
+        Button { showSourceFolderManager = true } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "folder.badge.plus")
+                    .foregroundStyle(.blue)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    let total = sourceFolderStore.folders.count
+                    let online = sourceFolderStore.onlineSpecs.count
+                    if total == 0 {
+                        Text("コピー元フォルダ")
+                            .foregroundStyle(.secondary)
+                        Text("未設定 — クリックして追加")
+                            .font(.caption2)
+                            .foregroundStyle(.tertiary)
+                    } else {
+                        Text("コピー元: \(total)フォルダ")
+                            .foregroundStyle(.primary)
+                        if online < total {
+                            Text("オフライン: \(total - online)フォルダ")
+                                .font(.caption2)
+                                .foregroundStyle(.orange)
+                        } else {
+                            Text("すべてオンライン")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                Spacer()
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.tertiary)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    // MARK: - フィルター初期化＆ロード
+
+    /// コピー元フォルダ設定ダイアログを閉じたとき、変更があれば1回だけ再読み込みする（案C：差分ロード）
+    private func handleSourceManagerDismiss() {
+        guard sourcesNeedReload else { return }
+        sourcesNeedReload = false
+        guard !vm.isCollectionMode else { return }
+
+        let newSpecs = sourceFolderStore.onlineSpecs
+        // 前回ロード済みに無い＝新たに有効化されたフォルダだけを抽出
+        let previous = Set(vm.loadedSources)
+        let newlyAdded = newSpecs.filter { !previous.contains($0) }
+
+        applyFilterStateToVM()
+        vm.loadIncremental(sources: newSpecs, newlyAdded: newlyAdded, minRating: minRating)
+    }
+
+    /// ContentView 側のフィルター状態を VM に反映（ロードはしない）
+    private func applyFilterStateToVM() {
+        vm.xmpSinceFilter = useXmpSince ? xmpSinceDate : nil
+        vm.locationFilter = selectedLocationIds
+        vm.filterGroups = filterGroups.map { Array($0.tagNames) }
+        vm.fileTypeFilter = fileTypeFilter
+        vm.ratingFilterMode = ratingFilterMode
+        switch dateFilterMode {
+        case .off:
+            vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
+        case .annual:
+            vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
+        case .range:
+            vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
+        }
+    }
+
+    private func setupFiltersAndLoad(sources: [SourceSpec]) {
+        applyFilterStateToVM()
+        vm.load(sources: sources, minRating: minRating)
+    }
+
+    // MARK: - タブごとフィルター（案C：スナップショット記憶・復元）
+
+    /// 現在のフィルター条件をスナップショットとして取り出す
+    private func captureFilterState() -> TabFilterState {
+        TabFilterState(
+            minRating: minRating,
+            ratingFilterMode: ratingFilterMode,
+            filterGroups: filterGroups,
+            selectedColorLabels: selectedColorLabels,
+            selectedLocationIds: selectedLocationIds,
+            fileTypeFilter: fileTypeFilter,
+            dateFilterMode: dateFilterMode,
+            shotDateFrom: shotDateFrom,
+            shotDateTo: shotDateTo,
+            annualFilterDays: annualFilterDays,
+            useXmpSince: useXmpSince,
+            xmpSinceDate: xmpSinceDate,
+            activePresetId: activePresetId
+        )
+    }
+
+    /// スナップショットからフィルター条件を復元し、再適用する
+    private func restoreFilterState(_ s: TabFilterState) {
+        suppressPresetClear = true
+        defer { DispatchQueue.main.async { suppressPresetClear = false } }
+        minRating           = s.minRating
+        ratingFilterMode    = s.ratingFilterMode
+        filterGroups        = s.filterGroups
+        selectedColorLabels = s.selectedColorLabels
+        selectedLocationIds = s.selectedLocationIds
+        fileTypeFilter      = s.fileTypeFilter
+        dateFilterMode      = s.dateFilterMode
+        shotDateFrom        = s.shotDateFrom
+        shotDateTo          = s.shotDateTo
+        annualFilterDays    = s.annualFilterDays
+        useXmpSince         = s.useXmpSince
+        xmpSinceDate        = s.xmpSinceDate
+        activePresetId      = s.activePresetId
+        pushFiltersToVMAndApply()
+    }
+
+    /// ContentView 側のフィルター状態を VM に反映して再フィルターを実行する
+    private func pushFiltersToVMAndApply() {
+        vm.xmpSinceFilter   = useXmpSince ? xmpSinceDate : nil
+        vm.locationFilter   = selectedLocationIds
+        vm.filterGroups     = filterGroups.map { Array($0.tagNames) }
+        vm.fileTypeFilter   = fileTypeFilter
+        vm.ratingFilterMode = ratingFilterMode
+        vm.colorLabelFilter = selectedColorLabels
+        switch dateFilterMode {
+        case .off:
+            vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
+        case .annual:
+            vm.annualFilterDays = annualFilterDays; vm.shotDateFrom = nil; vm.shotDateTo = nil
+        case .range:
+            vm.annualFilterDays = nil; vm.shotDateFrom = shotDateFrom; vm.shotDateTo = shotDateTo
+        }
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+    }
+
+    /// タブを切り替える。現在タブのフィルターを保存し、移動先タブのフィルターを復元する。
+    /// 移動先に記憶がなければ現在のフィルターを引き継ぐ（初回訪問）。
+    private func switchTab(to tab: SourceTab) {
+        guard tab != activeTab else { return }
+        tabFilters[activeTab] = captureFilterState()
+        activeTab = tab
+        if let saved = tabFilters[tab] {
+            restoreFilterState(saved)
+        } else {
+            // 初回訪問：現在のフィルターを引き継ぎ、その内容をこのタブの記憶として確定
+            tabFilters[tab] = captureFilterState()
+        }
+    }
+
+    /// TabFilterState → FilterSpec（実際にフィルターに使う形へ変換）
+    private func filterSpec(from s: TabFilterState) -> FilterSpec {
+        FilterSpec(
+            minRating: s.minRating,
+            ratingMode: s.ratingFilterMode,
+            fileTypeFilter: s.fileTypeFilter,
+            colorLabelFilter: s.selectedColorLabels,
+            filterGroups: s.filterGroups.map { Array($0.tagNames) },
+            locationFilter: s.selectedLocationIds,
+            annualFilterDays: s.dateFilterMode == .annual ? s.annualFilterDays : nil,
+            shotDateFrom: s.dateFilterMode == .range ? s.shotDateFrom : nil,
+            shotDateTo:   s.dateFilterMode == .range ? s.shotDateTo : nil,
+            xmpSinceFilter: s.useXmpSince ? s.xmpSinceDate : nil
+        )
+    }
+
+    /// 指定タブのフィルター状態（アクティブタブは現在の編集中状態を使う）
+    private func filterState(for tab: SourceTab) -> TabFilterState {
+        if tab == activeTab { return captureFilterState() }
+        return tabFilters[tab] ?? captureFilterState()
+    }
+
+    /// 指定タブの対象ファイル（フィルター前。フォルダ接頭辞でスライス）
+    private func folderFiles(for tab: SourceTab) -> [PhotoFile] {
+        switch tab {
+        case .all:
+            return vm.allFiles
+        case .folder(let id):
+            guard let folder = sourceFolderStore.folders.first(where: { $0.id == id }),
+                  let url = folder.resolvedURL else { return [] }
+            let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
+            return vm.allFiles.filter { $0.rawURL.path.hasPrefix(base) }
+        }
+    }
+
+    /// 指定タブの件数を、そのタブ自身のフィルター条件で正確に計算する
+    private func tabCount(_ tab: SourceTab) -> Int {
+        // アクティブタブは vm.filteredFiles に計算済みなので再計算を避ける
+        if tab == activeTab { return filesForActiveTab.count }
+        return vm.count(in: folderFiles(for: tab), spec: filterSpec(from: filterState(for: tab)))
+    }
+
+    /// ステータスバー左（絞り込み件数）。タブ表示中はアクティブタブ基準。
+    private var statusFilteredCount: Int {
+        isTabbedMode ? filesForActiveTab.count : vm.filteredFiles.count
+    }
+
+    /// ステータスバー右（総件数）。タブ表示中はアクティブタブのフォルダの総数。
+    private var statusTotalCount: Int {
+        isTabbedMode ? folderFiles(for: activeTab).count : vm.allFiles.count
+    }
+
+    // MARK: - タブ別フィルターの永続化（フォルダタブのみ。「すべて」は従来のグローバル設定で保持）
+
+    /// アクティブタブのフィルターを記憶（フォルダタブはディスクにも保存）
+    private func persistActiveTabFilter() {
+        tabFilters[activeTab] = captureFilterState()
+        saveTabFiltersToDefaults()
+    }
+
+    private func saveTabFiltersToDefaults() {
+        var dict: [String: TabFilterDTO] = [:]
+        for (tab, st) in tabFilters {
+            if case .folder(let id) = tab { dict[id.uuidString] = TabFilterDTO(st) }
+        }
+        if let data = try? JSONEncoder().encode(dict) {
+            UserDefaults.standard.set(data, forKey: Keys.tabFilters)
+        }
+    }
+
+    private func loadTabFiltersFromDefaults() {
+        guard let data = UserDefaults.standard.data(forKey: Keys.tabFilters),
+              let dict = try? JSONDecoder().decode([String: TabFilterDTO].self, from: data)
+        else { return }
+        for (key, dto) in dict {
+            if let id = UUID(uuidString: key) { tabFilters[.folder(id)] = dto.state }
+        }
+    }
+
     private func resetWindowState() {
         // 表示設定をデフォルトに戻す
         displaySettings.viewMode    = .grid
@@ -1644,9 +2094,10 @@ struct ContentView: View {
 
     @ViewBuilder
     private var copySection: some View {
-        if srcURL != nil, let dst = dstURL, let src = srcURL {
+        let srcSpecs = sourceFolderStore.onlineSpecs
+        if !srcSpecs.isEmpty, let dst = dstURL {
             Button {
-                vm.runCopy(to: dst, keepStructure: keepStructure, baseURL: src, dryRun: true)
+                vm.runCopy(to: dst, keepStructure: keepStructure, sources: srcSpecs, dryRun: true)
             } label: {
                 Label("プレビュー（\(vm.filteredFiles.count)件）", systemImage: "eye")
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -1664,13 +2115,14 @@ struct ContentView: View {
             .alert("コピーの確認", isPresented: $showCopyConfirm) {
                 Button("キャンセル", role: .cancel) {}
                 Button("コピー実行") {
-                    vm.runCopy(to: dst, keepStructure: keepStructure, baseURL: src, dryRun: false)
+                    vm.runCopy(to: dst, keepStructure: keepStructure, sources: srcSpecs, dryRun: false)
                 }
             } message: {
+                let srcNames = srcSpecs.map { $0.url.lastPathComponent }.joined(separator: ", ")
                 Text("""
                 現在表示されている画像がコピー対象となります。
 
-                コピー元: \(src.path)
+                コピー元: \(srcSpecs.count)フォルダ（\(srcNames)）
                 コピー先: \(dst.path)
                 対象: \(vm.filteredFiles.count) 件
                 """)
@@ -1695,6 +2147,92 @@ struct ContentView: View {
         vm.filteredFiles.filter { selection.contains($0.id) }
     }
 
+    // MARK: - フォルダ別タブ
+
+    /// タブ表示が有効か（フォルダ別設定 かつ コレクションモードでない かつ フォルダが1つ以上）
+    private var isTabbedMode: Bool {
+        displaySettings.thumbnailGrouping == .byFolder
+            && !vm.isCollectionMode
+            && !sourceFolderStore.enabledFolders.isEmpty
+    }
+
+    /// 指定フォルダ配下のファイルだけを返す
+    private func files(inFolder folder: SourceFolder) -> [PhotoFile] {
+        guard let url = folder.resolvedURL else { return [] }
+        let base = url.path.hasSuffix("/") ? url.path : url.path + "/"
+        return vm.filteredFiles.filter { $0.rawURL.path.hasPrefix(base) }
+    }
+
+    /// 現在アクティブなタブに対応するファイル
+    private var filesForActiveTab: [PhotoFile] {
+        guard isTabbedMode else { return vm.filteredFiles }
+        switch activeTab {
+        case .all:
+            return vm.filteredFiles
+        case .folder(let id):
+            guard let folder = sourceFolderStore.folders.first(where: { $0.id == id }) else {
+                return vm.filteredFiles
+            }
+            return files(inFolder: folder)
+        }
+    }
+
+    @ViewBuilder
+    private var folderTabBar: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                folderTabButton(title: "すべて", count: tabCount(.all), tab: .all, online: true)
+                ForEach(sourceFolderStore.enabledFolders) { folder in
+                    let name = URL(fileURLWithPath: folder.displayPath).lastPathComponent
+                    folderTabButton(
+                        title: name,
+                        count: tabCount(.folder(folder.id)),
+                        tab: .folder(folder.id),
+                        online: folder.isOnline
+                    )
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 5)
+        }
+        .background(.bar)
+    }
+
+    private func folderTabButton(title: String, count: Int, tab: SourceTab, online: Bool) -> some View {
+        let isActive = activeTab == tab
+        return Button {
+            switchTab(to: tab)
+        } label: {
+            HStack(spacing: 5) {
+                if tab != .all {
+                    Circle()
+                        .fill(online ? Color.green : Color.secondary.opacity(0.35))
+                        .frame(width: 6, height: 6)
+                }
+                Text(title)
+                    .font(.system(size: 12, weight: isActive ? .semibold : .regular))
+                    .lineLimit(1)
+                Text("\(count)")
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(isActive ? Color.white.opacity(0.9) : Color.secondary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1)
+                    .background(
+                        Capsule().fill(isActive ? Color.accentColor.opacity(0.65)
+                                                : Color.secondary.opacity(0.18))
+                    )
+            }
+            .foregroundStyle(isActive ? Color.accentColor : Color.primary)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 7)
+                    .fill(isActive ? Color.accentColor.opacity(0.14) : Color.secondary.opacity(0.06))
+            )
+        }
+        .buttonStyle(.plain)
+    }
+
     private var detailView: some View {
         HStack(spacing: 0) {
             VStack(spacing: 0) {
@@ -1704,7 +2242,7 @@ struct ContentView: View {
                         ProgressView().scaleEffect(0.65)
                         Text("読み込み中...").font(.caption).foregroundStyle(.secondary)
                     } else {
-                        Text("\(vm.filteredFiles.count) / \(vm.allFiles.count) ファイル")
+                        Text("\(statusFilteredCount) / \(statusTotalCount) ファイル")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                         if !selection.isEmpty {
@@ -1786,9 +2324,9 @@ struct ContentView: View {
                         .buttonStyle(.borderless)
                         .help("コレクションをフォルダにコピー")
                     }
-                    if let url = srcURL, !vm.isLoading, !vm.isCollectionMode {
+                    if !sourceFolderStore.onlineSpecs.isEmpty, !vm.isLoading, !vm.isCollectionMode {
                         Button {
-                            vm.rescan(from: url, minRating: minRating)
+                            vm.rescan(sources: sourceFolderStore.onlineSpecs, minRating: minRating)
                         } label: {
                             Image(systemName: "arrow.clockwise")
                                 .font(.system(size: 12))
@@ -1800,13 +2338,14 @@ struct ContentView: View {
                     }
                     if !vm.filteredFiles.isEmpty {
                         Button {
-                            selection = Set(vm.filteredFiles.map(\.id))
+                            // タブ表示中はアクティブなタブ内のみ追加選択（他タブの選択は維持）
+                            selection.formUnion(filesForActiveTab.map(\.id))
                         } label: {
                             Image(systemName: "square.stack.fill")
                                 .font(.system(size: 12))
                         }
                         .buttonStyle(.borderless)
-                        .help("全選択")
+                        .help(isTabbedMode ? "このタブを全選択" : "全選択")
 
                         Button {
                             selection.removeAll()
@@ -1860,8 +2399,14 @@ struct ContentView: View {
 
                 Divider()
 
+                // フォルダ別タブ
+                if isTabbedMode {
+                    folderTabBar
+                    Divider()
+                }
+
                 FileListView(
-                    files: vm.filteredFiles,
+                    files: filesForActiveTab,
                     totalCount: vm.allFiles.count,
                     selection: $selection,
                     sortColumn: vm.listSortColumn,
@@ -1982,29 +2527,30 @@ struct FolderPickerRow: View {
     @Binding var url: URL?
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.callout).fontWeight(.medium).foregroundStyle(.secondary)
-                if let url {
-                    Text(url.path)
-                        .lineLimit(3)
-                        .truncationMode(.middle)
-                        .font(.callout)
-                        .foregroundStyle(.primary)
-                } else {
-                    Text("未選択")
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            Spacer()
-            Button { pick() } label: {
+        Button { pick() } label: {
+            HStack(alignment: .top, spacing: 8) {
                 Image(systemName: "folder.badge.plus")
-                    .font(.title3)
+                    .foregroundStyle(.blue)
+                    .frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(label).font(.callout).fontWeight(.medium).foregroundStyle(.secondary)
+                    if let url {
+                        Text(url.path)
+                            .lineLimit(3)
+                            .truncationMode(.middle)
+                            .font(.callout)
+                            .foregroundStyle(.primary)
+                    } else {
+                        Text("未選択")
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Spacer()
             }
-            .buttonStyle(.bordered)
-            .tint(.accentColor)
+            .contentShape(Rectangle())
         }
+        .buttonStyle(.plain)
     }
 
     private func pick() {

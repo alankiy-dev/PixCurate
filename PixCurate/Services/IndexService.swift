@@ -32,7 +32,169 @@ enum IndexService {
         }
     }
 
-    // MARK: - フルスキャン＋DB同期
+    /// 複数ソースから DB をロード（重複除去・recursive/非recursive 対応）
+    nonisolated static func loadFromDB(sources: [SourceSpec]) -> [PhotoFile] {
+        guard !sources.isEmpty else { return [] }
+        var seen = Set<String>()
+        var result: [PhotoFile] = []
+        for spec in sources {
+            let rows = DatabaseService.shared.loadFiles(under: spec.url)
+            let locStore = LocationStore.shared
+            for row in rows {
+                guard seen.insert(row.path).inserted else { continue }
+                // 非recursive の場合は直下のファイルのみ
+                if !spec.isRecursive {
+                    let parentPath = URL(fileURLWithPath: row.path)
+                        .deletingLastPathComponent().path
+                    guard parentPath == spec.url.path else { continue }
+                }
+                var file = row.toPhotoFile()
+                if let lid = file.locationId {
+                    file.locationPath = locStore.buildLocationPath(for: lid)
+                }
+                result.append(file)
+            }
+        }
+        return result
+    }
+
+    // MARK: - フルスキャン＋DB同期（複数ソース）
+
+    /// 複数ソースをまとめてスキャンする（recursive/非recursive 対応）
+    nonisolated static func fullScan(
+        sources: [SourceSpec],
+        progress: @Sendable (Int, Int) -> Void = { _, _ in }
+    ) -> (files: [PhotoFile], result: ScanResult) {
+        guard !sources.isEmpty else {
+            return ([], ScanResult(loaded: 0, added: 0, updated: 0, removed: 0))
+        }
+
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
+        let fm = FileManager.default
+        var diskPaths = Set<String>()
+        var allURLs: [URL] = []
+
+        for spec in sources {
+            let urls = collectURLs(in: spec, extensions: rawExtensions, fm: fm)
+            for url in urls where diskPaths.insert(url.path).inserted {
+                allURLs.append(url)
+            }
+        }
+
+        let total = allURLs.count
+
+        // XMP更新日時を収集
+        var xmpDates: [String: Date] = [:]
+        for url in allURLs {
+            let xmp = url.deletingPathExtension().appendingPathExtension("xmp")
+            if let attr = try? fm.attributesOfItem(atPath: xmp.path),
+               let mod = attr[.modificationDate] as? Date {
+                xmpDates[url.path] = mod
+            }
+        }
+
+        // DBから現在のデータを収集（全ソース分）
+        var dbDict: [String: DBFileRow] = [:]
+        var allIndexed = Set<String>()
+        for spec in sources {
+            let rows = DatabaseService.shared.loadFiles(under: spec.url)
+            for row in rows {
+                dbDict[row.path] = row
+                if spec.isRecursive {
+                    allIndexed.insert(row.path)
+                } else {
+                    let parent = URL(fileURLWithPath: row.path).deletingLastPathComponent().path
+                    if parent == spec.url.path { allIndexed.insert(row.path) }
+                }
+            }
+        }
+
+        var changedPaths = Set<String>()
+        for spec in sources {
+            changedPaths.formUnion(
+                DatabaseService.shared.changedPaths(under: spec.url, currentXmpDates: xmpDates)
+            )
+        }
+
+        let locStore = LocationStore.shared
+        var scanned: [PhotoFile] = []
+        var added = 0
+        var updated = 0
+
+        for (i, fileURL) in allURLs.enumerated() {
+            progress(i + 1, total)
+            let path = fileURL.path
+            let isNew = dbDict[path] == nil
+            let isChanged = changedPaths.contains(path) || isNew
+
+            if isChanged {
+                var file = PhotoFile(rawURL: fileURL)
+                let xmpURL = file.xmpURL
+                if fm.fileExists(atPath: xmpURL.path) {
+                    file.rating       = XMPService.readRating(xmpURL: xmpURL)
+                    file.tags         = XMPTagService.readTags(xmpURL: xmpURL)
+                    file.locationPath = XMPLocationService.readLocation(xmpURL: xmpURL)
+                    file.colorLabel   = XMPService.readColorLabel(xmpURL: xmpURL)
+                }
+                file.shotDate = EXIFService.readShotDate(url: fileURL)
+                    ?? (try? fm.attributesOfItem(atPath: fileURL.path))?[.modificationDate] as? Date
+                if let lp = file.locationPath {
+                    file.locationId = locStore.match(path: lp)
+                }
+                let xmpMod = xmpDates[path]
+                file.xmpModifiedAt = xmpMod
+                DatabaseService.shared.upsert(file, xmpModifiedAt: xmpMod)
+                scanned.append(file)
+                if isNew { added += 1 } else { updated += 1 }
+            } else if let row = dbDict[path] {
+                var file = row.toPhotoFile()
+                if let lid = file.locationId {
+                    file.locationPath = locStore.buildLocationPath(for: lid)
+                }
+                scanned.append(file)
+            } else {
+                scanned.append(PhotoFile(rawURL: fileURL))
+            }
+        }
+
+        // DBにあってディスクにないファイルを削除
+        let stale = allIndexed.subtracting(diskPaths)
+        for path in stale { DatabaseService.shared.delete(path: path) }
+
+        scanned.sort { $0.filename < $1.filename }
+
+        let result = ScanResult(loaded: 0, added: added, updated: updated, removed: stale.count)
+        return (scanned, result)
+    }
+
+    /// 1フォルダ内のRAWファイルURLを収集（recursive/非recursive 対応）
+    private nonisolated static func collectURLs(
+        in spec: SourceSpec,
+        extensions: Set<String>,
+        fm: FileManager
+    ) -> [URL] {
+        if spec.isRecursive {
+            var result: [URL] = []
+            guard let enumerator = fm.enumerator(
+                at: spec.url,
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            ) else { return [] }
+            while let url = enumerator.nextObject() as? URL {
+                if extensions.contains(url.pathExtension.lowercased()) { result.append(url) }
+            }
+            return result
+        } else {
+            let contents = (try? fm.contentsOfDirectory(
+                at: spec.url,
+                includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+            )) ?? []
+            return contents.filter { extensions.contains($0.pathExtension.lowercased()) }
+        }
+    }
+
+    // MARK: - フルスキャン＋DB同期（単一フォルダ・後方互換）
 
     nonisolated static func fullScan(
         folder: URL,
