@@ -2462,8 +2462,12 @@ struct ContentView: View {
                         Button {
                             thumbnailRefreshToken &+= 1
                         } label: {
-                            Image(systemName: "photo.badge.arrow.down")
-                                .font(.system(size: 12))
+                            HStack(spacing: 3) {
+                                Image(systemName: "photo.badge.arrow.down")
+                                    .font(.system(size: 12))
+                                Text("サムネ更新")
+                                    .font(.caption)
+                            }
                         }
                         .buttonStyle(.borderless)
                         .help("サムネイルを再読み込み（現像後JPEGを反映。再スキャンとは別）")
