@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - FileListView
 
@@ -17,6 +18,8 @@ struct FileListView: View {
     let onAddToCollection: (PhotoCollection, [PhotoFile]) -> Void
     let onCreateAndAdd: ([PhotoFile]) -> Void
     let onRemoveFromCollection: (([PhotoFile]) -> Void)?
+    /// サムネイル再読み込み用トークン（変化でセルの .task を再実行）
+    var thumbnailRefreshToken: Int = 0
 
     @Environment(DisplaySettings.self) var settings
     @Environment(\.openWindow) var openWindow
@@ -58,7 +61,8 @@ struct FileListView: View {
             ScrollView {
                 LazyVGrid(columns: columns, spacing: settings.thumbSize.spacing) {
                     ForEach(files) { file in
-                        PhotoCell(file: file, isSelected: selection.contains(file.id))
+                        PhotoCell(file: file, isSelected: selection.contains(file.id),
+                                  refreshToken: thumbnailRefreshToken)
                             .id(file.id)
                             .onTapGesture(count: 2) {
                                 selection = [file.id]
@@ -118,7 +122,8 @@ struct FileListView: View {
             LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
                 Section {
                     ForEach(files) { file in
-                        PhotoListRow(file: file, isSelected: selection.contains(file.id))
+                        PhotoListRow(file: file, isSelected: selection.contains(file.id),
+                                     refreshToken: thumbnailRefreshToken)
                             .padding(.horizontal, ListLayout.rowHPad)
                             .contentShape(Rectangle())
                             .onTapGesture(count: 2) {
@@ -220,6 +225,11 @@ struct FileListView: View {
         } label: {
             Label("Finderで表示", systemImage: "folder")
         }
+        Menu {
+            openWithMenuItems(for: file)
+        } label: {
+            Label("開く", systemImage: "square.and.arrow.up.on.square")
+        }
         Divider()
         Menu("評価を設定") {
             Button("★★★★★  5") { onRateSelected(5) }
@@ -280,6 +290,104 @@ struct FileListView: View {
             return files.filter { selection.contains($0.id) }
         }
         return [file]
+    }
+
+    // MARK: - 「開く」メニュー（現像アプリ等で起動）
+
+    /// 右クリックされたファイル（選択中なら選択全体）を対象に、起動アプリ候補を出す
+    private func openWithMenuItems(for file: PhotoFile) -> AnyView {
+        let urls = contextTargets(for: file).map(\.rawURL)
+        let primary = urls.first ?? file.rawURL
+        // 現像系アプリ（Photoshop/Bridge/Lightroom 等）を優先表示。
+        // ※「Camera Raw」は単体アプリではないため、Photoshop で開くと Camera Raw が起動する。
+        let developApps = developApplications()
+        // 型登録から自動検出した対応アプリ（現像アプリと重複するものは除く）
+        let developPaths = Set(developApps.map { $0.standardizedFileURL.path })
+        let otherApps = NSWorkspace.shared.urlsForApplications(toOpen: primary)
+            .filter { !developPaths.contains($0.standardizedFileURL.path) }
+        return AnyView(
+            Group {
+                if !developApps.isEmpty {
+                    ForEach(developApps, id: \.self) { appURL in
+                        Button(appDisplayName(appURL)) { openFiles(urls, with: appURL) }
+                    }
+                    Divider()
+                }
+                Button("デフォルトアプリで開く") { openFiles(urls, with: nil) }
+                if !otherApps.isEmpty {
+                    Menu("対応アプリで開く") {
+                        ForEach(otherApps, id: \.self) { appURL in
+                            Button(appDisplayName(appURL)) { openFiles(urls, with: appURL) }
+                        }
+                    }
+                }
+                Divider()
+                Button("ほかのアプリを選択…") { chooseApplicationAndOpen(urls) }
+            }
+        )
+    }
+
+    /// インストール済みの現像系アプリを名前で探す（型登録に依存せず検出する）。
+    /// Adobe 製品は「/Applications/Adobe Photoshop 2026/Adobe Photoshop 2026.app」のように
+    /// 1 階層下に入るため、サブフォルダも 1 段だけ走査する。
+    private func developApplications() -> [URL] {
+        let keywords = ["photoshop", "bridge", "lightroom", "capture one", "dxo",
+                        "affinity photo", "raw power", "rawtherapee", "darktable",
+                        "luminar", "silkypix", "iridient", "graphicconverter"]
+        func isDevelopApp(_ name: String) -> Bool {
+            let lower = name.lowercased()
+            return keywords.contains { lower.contains($0) }
+        }
+        let fm = FileManager.default
+        let roots = ["/Applications",
+                     (NSHomeDirectory() as NSString).appendingPathComponent("Applications")]
+        var found: [String: URL] = [:]   // path -> url（重複排除）
+        for root in roots {
+            guard let entries = try? fm.contentsOfDirectory(atPath: root) else { continue }
+            for entry in entries {
+                let path = (root as NSString).appendingPathComponent(entry)
+                if entry.hasSuffix(".app") {
+                    if isDevelopApp(entry) { found[path] = URL(fileURLWithPath: path) }
+                } else if let subs = try? fm.contentsOfDirectory(atPath: path) {
+                    for sub in subs where sub.hasSuffix(".app") && isDevelopApp(sub) {
+                        let p = (path as NSString).appendingPathComponent(sub)
+                        found[p] = URL(fileURLWithPath: p)
+                    }
+                }
+            }
+        }
+        return found.values.sorted {
+            appDisplayName($0).localizedCaseInsensitiveCompare(appDisplayName($1)) == .orderedAscending
+        }
+    }
+
+    private func appDisplayName(_ appURL: URL) -> String {
+        let name = FileManager.default.displayName(atPath: appURL.path)
+        return name.hasSuffix(".app") ? String(name.dropLast(4)) : name
+    }
+
+    /// ファイル群を指定アプリ（nil ならデフォルト）で開く
+    private func openFiles(_ urls: [URL], with appURL: URL?) {
+        guard !urls.isEmpty else { return }
+        let config = NSWorkspace.OpenConfiguration()
+        if let appURL {
+            NSWorkspace.shared.open(urls, withApplicationAt: appURL, configuration: config)
+        } else {
+            for url in urls { NSWorkspace.shared.open(url) }
+        }
+    }
+
+    /// アプリ選択パネルを出して、選んだアプリで開く
+    private func chooseApplicationAndOpen(_ urls: [URL]) {
+        guard !urls.isEmpty else { return }
+        let panel = NSOpenPanel()
+        panel.title = "起動するアプリケーションを選択"
+        panel.allowedContentTypes = [.application]
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = URL(fileURLWithPath: "/Applications")
+        if panel.runModal() == .OK, let appURL = panel.url {
+            openFiles(urls, with: appURL)
+        }
     }
 
     // MARK: - Key press
@@ -379,6 +487,8 @@ private extension View {
 struct PhotoCell: View {
     let file: PhotoFile
     let isSelected: Bool
+    /// 値が変わると .task が再実行され、サムネイルを再読み込みする（更新後JPEG反映用）
+    var refreshToken: Int = 0
 
     @State private var thumbnail: NSImage?
     @State private var thumbnailFailed = false
@@ -504,7 +614,7 @@ struct PhotoCell: View {
                     .frame(width: w)
             }
         }
-        .task(id: file.rawURL) {
+        .task(id: "\(refreshToken)\u{1}\(file.rawURL.path)") {
             guard !file.isOffline else { return }
             thumbnailFailed = false
             let img = await ThumbnailService.thumbnail(for: file.rawURL)

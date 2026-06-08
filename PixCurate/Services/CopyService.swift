@@ -26,6 +26,8 @@ struct CopyService: Sendable {
         var progress = CopyProgress()
         let fm = FileManager.default
         var processed = 0
+        // ソースフォルダの一覧を使い回す（同名ファイル探索のたびに再列挙しない）
+        var dirCache: [String: [URL]] = [:]
 
         for file in files {
             let dstRaw: URL
@@ -53,10 +55,17 @@ struct CopyService: Sendable {
             if dryRun {
                 let overwrite = fm.fileExists(atPath: dstRaw.path) ? " [上書き]" : ""
                 log("  [プレビュー\(overwrite)] → \(dstRaw.path)")
+                // 同名で一緒にコピーされる関連ファイル（XMP/JPEG等）も表示
+                let companions = companionFiles(for: file.rawURL, fm: fm, cache: &dirCache)
+                    .map(\.lastPathComponent)
+                    .filter { $0 != file.rawURL.lastPathComponent }
+                if !companions.isEmpty {
+                    log("    + 同名ファイル: \(companions.joined(separator: ", "))")
+                }
                 progress.copied += 1
             } else {
                 do {
-                    try copyRawAndXMP(rawSrc: file.rawURL, rawDst: dstRaw, fm: fm)
+                    try copyCompanions(rawSrc: file.rawURL, rawDst: dstRaw, fm: fm, cache: &dirCache)
                     log("  ✅ → \(dstRaw.lastPathComponent)")
                     progress.copied += 1
                 } catch {
@@ -73,25 +82,42 @@ struct CopyService: Sendable {
 
     // MARK: - Private helpers
 
-    private nonisolated func copyRawAndXMP(rawSrc: URL, rawDst: URL, fm: FileManager) throws {
-        try fm.createDirectory(
-            at: rawDst.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        if fm.fileExists(atPath: rawDst.path) { try fm.removeItem(at: rawDst) }
-        try fm.copyItem(at: rawSrc, to: rawDst)
-        if let mtime = modTime(rawSrc) {
-            try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: rawDst.path)
-        }
+    /// RAW 本体と、同フォルダにある同名（拡張子は問わない）ファイルをすべてコピーする。
+    /// 例: DSCF5364.RAF / .xmp / .jpg をまとめてコピー先へ複製する。
+    private nonisolated func copyCompanions(rawSrc: URL, rawDst: URL, fm: FileManager,
+                                            cache: inout [String: [URL]]) throws {
+        let dstDir = rawDst.deletingLastPathComponent()
+        try fm.createDirectory(at: dstDir, withIntermediateDirectories: true)
 
-        let xmpSrc = rawSrc.deletingPathExtension().appendingPathExtension("xmp")
-        let xmpDst = rawDst.deletingPathExtension().appendingPathExtension("xmp")
-        guard fm.fileExists(atPath: xmpSrc.path) else { return }
-        if fm.fileExists(atPath: xmpDst.path) { try fm.removeItem(at: xmpDst) }
-        try fm.copyItem(at: xmpSrc, to: xmpDst)
-        if let mtime = modTime(xmpSrc) {
-            try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: xmpDst.path)
+        // 同名ファイル一覧（見つからなければ RAW 本体だけは必ずコピー）
+        var sources = companionFiles(for: rawSrc, fm: fm, cache: &cache)
+        if sources.isEmpty { sources = [rawSrc] }
+
+        for src in sources {
+            let dstURL = dstDir.appendingPathComponent(src.lastPathComponent)
+            if fm.fileExists(atPath: dstURL.path) { try fm.removeItem(at: dstURL) }
+            try fm.copyItem(at: src, to: dstURL)
+            if let mtime = modTime(src) {
+                try fm.setAttributes([.modificationDate: mtime], ofItemAtPath: dstURL.path)
+            }
         }
+    }
+
+    /// rawSrc と同じフォルダにある、ファイル名（拡張子を除く）が一致するファイル一覧。
+    /// rawSrc 自身も含む。ディレクトリ列挙結果は cache で使い回す。
+    private nonisolated func companionFiles(for rawSrc: URL, fm: FileManager,
+                                            cache: inout [String: [URL]]) -> [URL] {
+        let dir = rawSrc.deletingLastPathComponent()
+        let entries: [URL]
+        if let cached = cache[dir.path] {
+            entries = cached
+        } else {
+            entries = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil,
+                                                   options: [.skipsHiddenFiles])) ?? []
+            cache[dir.path] = entries
+        }
+        let stem = rawSrc.deletingPathExtension().lastPathComponent
+        return entries.filter { $0.deletingPathExtension().lastPathComponent == stem }
     }
 
     private nonisolated func modTime(_ url: URL) -> Date? {

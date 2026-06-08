@@ -2,53 +2,98 @@ import AppKit
 import ImageIO
 
 enum ThumbnailService {
+    /// キャッシュ1件。生成元ファイルの更新日時を保持し、レタッチ等で
+    /// ファイルが変わったら（更新日時が変わったら）自動で再生成できるようにする。
+    private struct CacheEntry {
+        let mtime: Date?
+        let image: NSImage
+    }
+
     // MainActor上でキャッシュ管理
-    @MainActor private static var cache: [URL: NSImage] = [:]
-    @MainActor private static var fullCache: [URL: NSImage] = [:]
-    /// 取得を試みて失敗したURL。再レンダリングのたびに何度もエラーログが出るのを防ぐ
-    @MainActor private static var failedURLs: Set<URL> = []
+    @MainActor private static var cache: [URL: CacheEntry] = [:]
+    @MainActor private static var fullCache: [URL: CacheEntry] = [:]
+    /// 取得を試みて失敗したURLとその時点の更新日時。
+    /// 同じ更新日時のうちは再試行せず、ファイルが変わったら再試行する。
+    @MainActor private static var failed: [URL: Date?] = [:]
 
     // 常に大サイズで生成してキャッシュ。縮小表示は SwiftUI に任せる
     private static let fixedMaxPixel = 600
 
-    static func thumbnail(for url: URL, maxPixel: Int = 320) async -> NSImage? {
-        // キャッシュヒット
-        if let cached = await MainActor.run(body: { cache[url] }) {
-            return cached
+    /// RAW 拡張子（この場合のみ同名 JPEG を優先して画像ソースに使う）
+    private static let rawExtensions: Set<String> = ["raf", "arw", "cr3", "cr2"]
+
+    /// ファイルの更新日時を取得（メタデータのみの軽い読み取り）
+    nonisolated private static func modDate(_ url: URL) -> Date? {
+        (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+    }
+
+    /// サムネイル/プレビューの実際の画像ソースを決める。
+    /// RAW ファイルの隣に同名 JPEG（レタッチソフトの現像書き出し）があれば、
+    /// 現像後の絵を表示するためにその JPEG をソースにする。無ければ RAW 本体。
+    nonisolated private static func imageSourceURL(for url: URL) -> URL {
+        guard rawExtensions.contains(url.pathExtension.lowercased()) else { return url }
+        let fm = FileManager.default
+        let base = url.deletingPathExtension()
+        for ext in ["jpg", "JPG", "jpeg", "JPEG"] {
+            let candidate = base.appendingPathExtension(ext)
+            if fm.fileExists(atPath: candidate.path) { return candidate }
         }
-        // 過去に失敗済みのURLは再試行しない
-        let alreadyFailed = await MainActor.run { failedURLs.contains(url) }
-        if alreadyFailed { return nil }
+        return url
+    }
+
+    static func thumbnail(for url: URL, maxPixel: Int = 320) async -> NSImage? {
+        // 画像ソース（同名 JPEG 優先）とその更新日時を取得（メインスレッドをブロックしない）。
+        // キャッシュ鍵は表示上の url（RAW）だが、更新日時は実ソース基準にするので、
+        // JPEG を後から書き出し直しても再表示で自動反映される。
+        let (source, mtime) = await Task.detached(priority: .userInitiated) { () -> (URL, Date?) in
+            let s = Self.imageSourceURL(for: url)
+            return (s, Self.modDate(s))
+        }.value
+
+        // キャッシュヒット（更新日時が一致するときのみ有効）
+        if let entry = await MainActor.run(body: { cache[url] }), entry.mtime == mtime {
+            return entry.image
+        }
+        // 同じ更新日時で過去に失敗しているなら再試行しない
+        if let failedMtime = await MainActor.run(body: { failed[url] }), failedMtime == mtime {
+            return nil
+        }
 
         let image = await Task.detached(priority: .userInitiated) {
-            Self.load(url: url, maxPixel: Self.fixedMaxPixel)
+            Self.load(url: source, maxPixel: Self.fixedMaxPixel)
         }.value
         await MainActor.run {
             if let image {
-                cache[url] = image
+                cache[url] = CacheEntry(mtime: mtime, image: image)
+                failed[url] = nil
             } else {
-                failedURLs.insert(url)   // 失敗を記録して次回はスキップ
+                failed[url] = .some(mtime)   // 失敗を記録（更新日時付き）
             }
         }
         return image
     }
 
     static func fullPreview(for url: URL) async -> NSImage? {
-        if let cached = await MainActor.run(body: { fullCache[url] }) {
-            return cached
+        let (source, mtime) = await Task.detached(priority: .userInitiated) { () -> (URL, Date?) in
+            let s = Self.imageSourceURL(for: url)
+            return (s, Self.modDate(s))
+        }.value
+
+        if let entry = await MainActor.run(body: { fullCache[url] }), entry.mtime == mtime {
+            return entry.image
         }
         let image = await Task.detached(priority: .userInitiated) {
-            Self.loadFullPreview(url: url)
+            Self.loadFullPreview(url: source)
         }.value
         if let image {
-            await MainActor.run { fullCache[url] = image }
+            await MainActor.run { fullCache[url] = CacheEntry(mtime: mtime, image: image) }
         }
         return image
     }
 
     /// 再スキャン・フォルダ切り替え時に失敗キャッシュをリセットして再試行を許可する
     @MainActor static func resetFailedURLs() {
-        failedURLs.removeAll()
+        failed.removeAll()
     }
 
     // MARK: - Thumbnail load

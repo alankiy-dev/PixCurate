@@ -217,6 +217,10 @@ class FileListViewModel {
     var copyCurrent: Int = 0
     var exiftoolMissing = false
     var ratingFilterMode: RatingFilterMode = .atLeast
+    /// 現在適用中の★下限。applyFilter で常に最新化する。
+    /// バックグラウンドスキャン完了時の再フィルターは引数ではなくこの値を使い、
+    /// スキャン中にユーザーが星フィルターを変えても表示とズレないようにする。
+    var minRating: Int = 0
 
     /// 現在 allFiles に読み込まれているソース（差分ロードの判定に使用）
     var loadedSources: [SourceSpec] = []
@@ -263,7 +267,8 @@ class FileListViewModel {
                 // コレクション表示中はスキャン結果でビューを上書きしない（DBには反映済み）
                 guard !isCollectionMode else { return }
                 allFiles = files
-                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                // スキャン中にユーザーが星フィルターを変えている可能性があるため最新値を使う
+                applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
                 isLoading = false
                 indexStatus = "DB: \(files.count)件"
                 if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
@@ -326,7 +331,7 @@ class FileListViewModel {
                 isIndexing = false
                 guard !isCollectionMode else { return }
                 allFiles = merged
-                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
                 indexStatus = "DB: \(merged.count)件"
                 if scanResult.added > 0 || scanResult.updated > 0 || scanResult.removed > 0 {
                     let parts = [
@@ -355,7 +360,7 @@ class FileListViewModel {
                 isIndexing = false
                 guard !isCollectionMode else { return }
                 allFiles = files
-                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
                 indexStatus = "DB: \(files.count)件（新規\(result.added) 更新\(result.updated) 削除\(result.removed)）"
             }
         }
@@ -377,7 +382,7 @@ class FileListViewModel {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
-                applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+                applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
                 isLoading = false
                 isIndexing = false
                 indexStatus = "DB再構築完了: \(files.count)件"
@@ -571,6 +576,7 @@ class FileListViewModel {
     }
 
     func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
+        self.minRating = minRating
         filteredFiles = filtered(allFiles, spec: currentSpec(minRating: minRating, ratingMode: ratingMode))
         applyListSort()
     }
@@ -694,6 +700,8 @@ struct ContentView: View {
     @State private var suppressPresetClear = false                     // タブ復元中はプリセット解除を抑止
     @State private var dstURL: URL? = nil   // 起動後にバックグラウンドで復元（メインスレッドをブロックしない）
     @State private var minRating: Int = UserDefaults.standard.object(forKey: Keys.minRating) as? Int ?? 1
+    /// サムネイル再読み込み用トークン。+1 すると表示中セルがサムネを読み直す（更新後JPEG反映用）
+    @State private var thumbnailRefreshToken: Int = 0
     @State private var keepStructure: Bool = UserDefaults.standard.bool(forKey: Keys.keepStructure)
     @State private var selection: Set<UUID> = []
     @State private var filterGroups: [TagFilterGroup] = []
@@ -834,6 +842,11 @@ struct ContentView: View {
         }
         .onReceive(NotificationCenter.default.publisher(for: .resetWindowState)) { _ in
             resetWindowState()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            // 他アプリ（Bridge等）で現像JPEGを書き出して戻ってきたとき、
+            // 表示中サムネイルを読み直す。変化したファイルだけ更新後JPEGに差し替わる。
+            thumbnailRefreshToken &+= 1
         }
         .onReceive(NotificationCenter.default.publisher(for: .photoRatingChanged)) { note in
             guard let url = note.userInfo?["url"] as? URL else { return }
@@ -2447,6 +2460,17 @@ struct ContentView: View {
                     }
                     if !vm.filteredFiles.isEmpty {
                         Button {
+                            thumbnailRefreshToken &+= 1
+                        } label: {
+                            Image(systemName: "photo.badge.arrow.down")
+                                .font(.system(size: 12))
+                        }
+                        .buttonStyle(.borderless)
+                        .help("サムネイルを再読み込み（現像後JPEGを反映。再スキャンとは別）")
+
+                        Divider().frame(height: 14)
+
+                        Button {
                             // タブ表示中はアクティブなタブ内のみ追加選択（他タブの選択は維持）
                             selection.formUnion(filesForActiveTab.map(\.id))
                         } label: {
@@ -2538,7 +2562,8 @@ struct ContentView: View {
                             collectionStore.removeFiles(files, from: col)
                             vm.loadCollection(col, minRating: minRating)
                         }
-                    }
+                    },
+                    thumbnailRefreshToken: thumbnailRefreshToken
                 )
 
                 if !vm.logLines.isEmpty || vm.isRunning {

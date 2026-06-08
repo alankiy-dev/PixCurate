@@ -3,6 +3,8 @@ import SwiftUI
 struct PhotoListRow: View {
     let file: PhotoFile
     let isSelected: Bool
+    /// 値が変わると .task が再実行され、サムネイルを再読み込みする
+    var refreshToken: Int = 0
 
     @State private var thumbnail: NSImage?
     @State private var exifInfo: EXIFInfo?
@@ -53,7 +55,7 @@ struct PhotoListRow: View {
         }
         .frame(height: ListLayout.thumbHeight + ListLayout.rowVPad * 2)
         .background(isSelected ? Color.accentColor.opacity(0.15) : Color.clear)
-        .task(id: file.rawURL) {
+        .task(id: "\(refreshToken)\u{1}\(file.rawURL.path)") {
             guard !file.isOffline else { return }
             async let thumb = ThumbnailService.thumbnail(
                 for: file.rawURL, maxPixel: Int(ListLayout.thumbWidth * 2))
