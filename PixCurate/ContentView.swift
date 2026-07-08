@@ -59,6 +59,7 @@ private enum Keys {
     static let gridWindowWidth          = "pixcurate.window.gridWidth"
     static let listWindowWidth          = "pixcurate.window.listWidth"
     static let annualFilterDays         = "pixcurate.annualFilterDays"
+    static let selectedSeasons          = "pixcurate.selectedSeasons"
     static let listSortColumn           = "pixcurate.listSortColumn"
     static let listSortAscending        = "pixcurate.listSortAscending"
 }
@@ -99,6 +100,7 @@ struct FilterSpec {
     var shotDateFrom: Date? = nil
     var shotDateTo: Date? = nil
     var xmpSinceFilter: Date? = nil
+    var seasonMonths: Set<Int> = []            // 空なら季節フィルターなし。非空なら撮影月がこの集合に含まれること
 }
 
 /// 1タブ分のフィルター条件をまとめて保持する。タブごとに独立して保持・計算する。
@@ -116,6 +118,7 @@ struct TabFilterState {
     var useXmpSince: Bool
     var xmpSinceDate: Date
     var activePresetId: UUID?
+    var selectedSeasons: Set<Season> = []
 }
 
 /// TabFilterState の永続化用 DTO（rawValue/プリミティブのみで Codable）
@@ -133,6 +136,7 @@ struct TabFilterDTO: Codable {
     var useXmpSince: Bool
     var xmpSinceDate: Date
     var presetId: String?
+    var seasons: [String] = []
 
     init(_ s: TabFilterState) {
         minRating    = s.minRating
@@ -148,6 +152,26 @@ struct TabFilterDTO: Codable {
         useXmpSince  = s.useXmpSince
         xmpSinceDate = s.xmpSinceDate
         presetId     = s.activePresetId?.uuidString
+        seasons      = s.selectedSeasons.map { $0.rawValue }
+    }
+
+    // seasons は後から追加した項目。旧データ（キー無し）でも壊れないよう decodeIfPresent で許容する
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        minRating    = try c.decode(Int.self, forKey: .minRating)
+        ratingMode   = try c.decode(String.self, forKey: .ratingMode)
+        tagGroups    = try c.decode([[String]].self, forKey: .tagGroups)
+        colorLabels  = try c.decode([String].self, forKey: .colorLabels)
+        locationIds  = try c.decode([String].self, forKey: .locationIds)
+        fileType     = try c.decode(String.self, forKey: .fileType)
+        dateMode     = try c.decode(String.self, forKey: .dateMode)
+        shotDateFrom = try c.decode(Date.self, forKey: .shotDateFrom)
+        shotDateTo   = try c.decode(Date.self, forKey: .shotDateTo)
+        annualDays   = try c.decode(Int.self, forKey: .annualDays)
+        useXmpSince  = try c.decode(Bool.self, forKey: .useXmpSince)
+        xmpSinceDate = try c.decode(Date.self, forKey: .xmpSinceDate)
+        presetId     = try c.decodeIfPresent(String.self, forKey: .presetId)
+        seasons      = try c.decodeIfPresent([String].self, forKey: .seasons) ?? []
     }
 
     var state: TabFilterState {
@@ -166,7 +190,8 @@ struct TabFilterDTO: Codable {
             annualFilterDays: annualDays,
             useXmpSince: useXmpSince,
             xmpSinceDate: xmpSinceDate,
-            activePresetId: presetId.flatMap { UUID(uuidString: $0) }
+            activePresetId: presetId.flatMap { UUID(uuidString: $0) },
+            selectedSeasons: Set(seasons.compactMap { Season(rawValue: $0) })
         )
     }
 }
@@ -390,6 +415,40 @@ class FileListViewModel {
         }
     }
 
+    // MARK: - メタデータ自動更新（他アプリ復帰時）
+
+    /// 変更されたXMPだけを軽く再スキャンして★・タグ等を画面へ反映する。
+    /// フルスキャンと同じ差分検出（XMP更新日時の比較）を使うため、
+    /// 実際にXMPを読み直すのは変わったファイルだけ。Bridge等での編集から戻ったときに反映する。
+    func refreshChangedMetadata(sources: [SourceSpec]) {
+        // 読み込み中・スキャン中・コピー中・コレクション表示中は走らせない
+        guard !isIndexing, !isLoading, !isRunning, !isCollectionMode, !sources.isEmpty else { return }
+        isIndexing = true
+        indexStatus = "更新を確認中…"
+
+        Task.detached {
+            let (files, result) = IndexService.fullScan(sources: sources)
+            await MainActor.run { [weak self] in
+                guard let self else { return }
+                isIndexing = false
+                // 途中でコレクション表示に切り替わっていたら上書きしない
+                guard !isCollectionMode else { return }
+                allFiles = files
+                applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
+                if result.added > 0 || result.updated > 0 || result.removed > 0 {
+                    let parts = [
+                        result.added   > 0 ? "新規\(result.added)件"   : nil,
+                        result.updated > 0 ? "更新\(result.updated)件" : nil,
+                        result.removed > 0 ? "削除\(result.removed)件" : nil,
+                    ].compactMap { $0 }.joined(separator: " / ")
+                    indexStatus = "DB: \(files.count)件（\(parts)）"
+                } else {
+                    indexStatus = "DB: \(files.count)件"
+                }
+            }
+        }
+    }
+
     var colorLabelFilter: Set<ColorLabel> = []
     var locationFilter: Set<UUID> = []
     var shotDateFrom: Date? = nil      // nilなら無効
@@ -397,6 +456,7 @@ class FileListViewModel {
     var xmpSinceFilter: Date? = nil   // nilなら無効
     var fileTypeFilter: FileTypeFilter = .rawOnly
     var annualFilterDays: Int? = nil   // nilなら無効。非nilのとき例年の今頃フィルターが有効
+    var seasonMonths: Set<Int> = []    // 空なら季節フィルターなし
 
     // MARK: - Collection mode
     var isCollectionMode: Bool = false
@@ -513,7 +573,8 @@ class FileListViewModel {
             annualFilterDays: annualFilterDays,
             shotDateFrom: shotDateFrom,
             shotDateTo: shotDateTo,
-            xmpSinceFilter: xmpSinceFilter
+            xmpSinceFilter: xmpSinceFilter,
+            seasonMonths: seasonMonths
         )
     }
 
@@ -539,10 +600,12 @@ class FileListViewModel {
         }
         guard typeOK else { return false }
         let ratingOK: Bool
-        if spec.minRating == 0 {
-            ratingOK = true
-        } else if spec.ratingMode == .exactly {
+        if spec.ratingMode == .exactly {
+            // 「のみ」：★0のみ（未評価だけ）も検索できる
             ratingOK = (file.rating ?? 0) == spec.minRating
+        } else if spec.minRating == 0 {
+            // 「以上」で★0＝下限なし（全件）
+            ratingOK = true
         } else {
             ratingOK = (file.rating ?? 0) >= spec.minRating
         }
@@ -572,7 +635,15 @@ class FileListViewModel {
         } else {
             xmpOK = true
         }
-        return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK
+        let seasonOK: Bool
+        if spec.seasonMonths.isEmpty {
+            seasonOK = true
+        } else if let shot = file.shotDate {
+            seasonOK = spec.seasonMonths.contains(cal.component(.month, from: shot))
+        } else {
+            seasonOK = false
+        }
+        return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK && seasonOK
     }
 
     func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
@@ -702,11 +773,18 @@ struct ContentView: View {
     @State private var minRating: Int = UserDefaults.standard.object(forKey: Keys.minRating) as? Int ?? 1
     /// サムネイル再読み込み用トークン。+1 すると表示中セルがサムネを読み直す（更新後JPEG反映用）
     @State private var thumbnailRefreshToken: Int = 0
+    /// 復帰時メタデータ自動更新のデバウンス用。連続でアクティブ化しても外付けドライブを走査しすぎない
+    @State private var lastAutoMetadataRefresh: Date = .distantPast
     @State private var keepStructure: Bool = UserDefaults.standard.bool(forKey: Keys.keepStructure)
     @State private var selection: Set<UUID> = []
     @State private var filterGroups: [TagFilterGroup] = []
     @State private var selectedColorLabels: Set<ColorLabel> = []
     @State private var selectedLocationIds: Set<UUID> = []
+    @State private var selectedSeasons: Set<Season> = Set(
+        (UserDefaults.standard.array(forKey: Keys.selectedSeasons) as? [String] ?? [])
+            .compactMap { Season(rawValue: $0) }
+    )
+    @State private var showSeasonSettings = false
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
@@ -769,6 +847,12 @@ struct ContentView: View {
         .sheet(isPresented: $showSourceFolderManager, onDismiss: handleSourceManagerDismiss) {
             SourceFolderManagerSheet()
                 .environment(sourceFolderStore)
+        }
+        .sheet(isPresented: $showSeasonSettings) {
+            SeasonSettingsSheet(onClose: { changed in
+                // 月割り当てが実際に変わったときだけ再適用（無駄な再描画＝ブリンクを防ぐ）
+                if changed { applySeasonFilter() }
+            })
         }
         .onAppear {
             columnVisibility = .all
@@ -844,9 +928,11 @@ struct ContentView: View {
             resetWindowState()
         }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            // 他アプリ（Bridge等）で現像JPEGを書き出して戻ってきたとき、
-            // 表示中サムネイルを読み直す。変化したファイルだけ更新後JPEGに差し替わる。
+            // 他アプリ（Bridge等）で編集して戻ってきたとき：
+            // 1) 表示中サムネイルを読み直す（変化したファイルは更新後JPEGに差し替え）
             thumbnailRefreshToken &+= 1
+            // 2) 変更されたXMPだけ軽く再スキャンして★・タグを反映
+            autoRefreshMetadataOnActivate()
         }
         .onReceive(NotificationCenter.default.publisher(for: .photoRatingChanged)) { note in
             guard let url = note.userInfo?["url"] as? URL else { return }
@@ -1015,8 +1101,12 @@ struct ContentView: View {
                     DisclosureGroup(isExpanded: $ratingFilterExpanded) {
                         VStack(alignment: .leading, spacing: 4) {
                             StarPickerView(selection: $minRating)
-                            if minRating > 0 {
-                                ratingModeToggle
+                            // ★0でも「のみ」を選べるようにし、未評価だけの抽出を可能にする
+                            ratingModeToggle
+                            if minRating == 0 && ratingFilterMode == .exactly {
+                                Text("★なし（未評価）のみを表示")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
                             }
                         }
                         .padding(.vertical, 2)
@@ -1068,6 +1158,48 @@ struct ContentView: View {
                     // 撮影日
                     DisclosureGroup(isExpanded: $shotDateFilterExpanded) {
                         VStack(alignment: .leading, spacing: SidebarLayout.contentSpacing) {
+
+                            // ── 季節（春夏秋冬）──────────────────────────
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("季節")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button { showSeasonSettings = true } label: {
+                                        Image(systemName: "gearshape").font(.caption)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("季節ごとの対象月を設定")
+                                }
+                                HStack(spacing: 5) {
+                                    ForEach(Season.allCases) { season in
+                                        let isOn = selectedSeasons.contains(season)
+                                        Button {
+                                            if isOn { selectedSeasons.remove(season) }
+                                            else { selectedSeasons.insert(season) }
+                                            applySeasonFilter()
+                                        } label: {
+                                            HStack(spacing: 3) {
+                                                Image(systemName: season.symbol)
+                                                Text(season.label)
+                                            }
+                                            .font(.system(size: 12, weight: isOn ? .semibold : .regular))
+                                            .foregroundStyle(isOn ? season.color : Color.secondary)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 5)
+                                            .background(
+                                                RoundedRectangle(cornerRadius: 6)
+                                                    .fill(isOn ? season.color.opacity(0.15) : Color.secondary.opacity(0.08))
+                                            )
+                                        }
+                                        .buttonStyle(.plain)
+                                    }
+                                    Spacer()
+                                }
+                            }
+
+                            Divider()
 
                             // ── モード切替（セグメント） ─────────────────
                             HStack {
@@ -1279,7 +1411,25 @@ struct ContentView: View {
                     collapsibleHeader("フィルター", color: .orange, expanded: filterExpanded, toggle: {
                         filterExpanded.toggle()
                         UserDefaults.standard.set(filterExpanded, forKey: Keys.filterExpanded)
-                    }, key: Keys.filterExpanded)
+                    }, key: Keys.filterExpanded, trailing: {
+                        AnyView(
+                            Group {
+                                if hasActiveFilter {
+                                    Button {
+                                        clearAllFilters()
+                                    } label: {
+                                        HStack(spacing: 3) {
+                                            Image(systemName: "xmark.circle.fill")
+                                            Text("すべて解除")
+                                        }
+                                        .font(.subheadline)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("フィルターをすべて解除して全件表示に戻す")
+                                }
+                            }
+                        )
+                    })
                 }
 
                 Section {
@@ -1991,6 +2141,7 @@ struct ContentView: View {
         vm.colorLabelFilter = selectedColorLabels
         vm.fileTypeFilter = fileTypeFilter
         vm.ratingFilterMode = ratingFilterMode
+        vm.seasonMonths = SeasonSettings.shared.months(forSeasons: selectedSeasons)
         switch dateFilterMode {
         case .off:
             vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
@@ -2009,6 +2160,65 @@ struct ContentView: View {
     // MARK: - タブごとフィルター（案C：スナップショット記憶・復元）
 
     /// 現在のフィルター条件をスナップショットとして取り出す
+    /// 他アプリから戻ってアクティブになったときの、変更XMPの軽い自動再スキャン。
+    /// 外付けドライブを走査しすぎないよう一定間隔でデバウンスし、処理中は行わない。
+    private func autoRefreshMetadataOnActivate() {
+        guard !vm.isCollectionMode, !vm.isRunning, !vm.isLoading, !vm.isIndexing else { return }
+        let specs = sourceFolderStore.onlineSpecs
+        guard !specs.isEmpty else { return }
+        // 直近に自動更新したばかりなら間引く（短時間の連続切替対策）
+        guard Date().timeIntervalSince(lastAutoMetadataRefresh) > 15 else { return }
+        lastAutoMetadataRefresh = Date()
+        vm.refreshChangedMetadata(sources: specs)
+    }
+
+    /// いずれかのフィルターが有効か（「すべて解除」ボタンの表示判定に使用）
+    private var hasActiveFilter: Bool {
+        minRating > 0
+        || ratingFilterMode == .exactly   // ★0のみ（未評価だけ）も絞り込み扱い
+        || fileTypeFilter != .rawOnly
+        || !selectedColorLabels.isEmpty
+        || filterGroups.contains { !$0.tagNames.isEmpty }
+        || !selectedLocationIds.isEmpty
+        || dateFilterMode != .off
+        || !selectedSeasons.isEmpty
+        || useXmpSince
+        || activePresetId != nil
+    }
+
+    /// 季節フィルターを VM に反映して再適用（＋保存）
+    private func applySeasonFilter() {
+        vm.seasonMonths = SeasonSettings.shared.months(forSeasons: selectedSeasons)
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+        UserDefaults.standard.set(selectedSeasons.map { $0.rawValue }, forKey: Keys.selectedSeasons)
+        persistActiveTabFilter()
+    }
+
+    /// すべてのフィルターを解除して全件表示に戻す（撮影日・更新日の値は保持したまま無効化）
+    private func clearAllFilters() {
+        let cleared = TabFilterState(
+            minRating: 0,
+            ratingFilterMode: .atLeast,
+            filterGroups: [],
+            selectedColorLabels: [],
+            selectedLocationIds: [],
+            fileTypeFilter: .rawOnly,
+            dateFilterMode: .off,
+            shotDateFrom: shotDateFrom,
+            shotDateTo: shotDateTo,
+            annualFilterDays: annualFilterDays,
+            useXmpSince: false,
+            xmpSinceDate: xmpSinceDate,
+            activePresetId: nil,
+            selectedSeasons: []
+        )
+        restoreFilterState(cleared)
+        persistActiveTabFilter()
+        UserDefaults.standard.set(0, forKey: Keys.minRating)
+        UserDefaults.standard.set(FileTypeFilter.rawOnly.rawValue, forKey: Keys.fileTypeFilter)
+        UserDefaults.standard.set([String](), forKey: Keys.selectedSeasons)
+    }
+
     private func captureFilterState() -> TabFilterState {
         TabFilterState(
             minRating: minRating,
@@ -2023,7 +2233,8 @@ struct ContentView: View {
             annualFilterDays: annualFilterDays,
             useXmpSince: useXmpSince,
             xmpSinceDate: xmpSinceDate,
-            activePresetId: activePresetId
+            activePresetId: activePresetId,
+            selectedSeasons: selectedSeasons
         )
     }
 
@@ -2044,6 +2255,7 @@ struct ContentView: View {
         useXmpSince         = s.useXmpSince
         xmpSinceDate        = s.xmpSinceDate
         activePresetId      = s.activePresetId
+        selectedSeasons     = s.selectedSeasons
         pushFiltersToVMAndApply()
     }
 
@@ -2055,6 +2267,7 @@ struct ContentView: View {
         vm.fileTypeFilter   = fileTypeFilter
         vm.ratingFilterMode = ratingFilterMode
         vm.colorLabelFilter = selectedColorLabels
+        vm.seasonMonths     = SeasonSettings.shared.months(forSeasons: selectedSeasons)
         switch dateFilterMode {
         case .off:
             vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
@@ -2092,7 +2305,8 @@ struct ContentView: View {
             annualFilterDays: s.dateFilterMode == .annual ? s.annualFilterDays : nil,
             shotDateFrom: s.dateFilterMode == .range ? s.shotDateFrom : nil,
             shotDateTo:   s.dateFilterMode == .range ? s.shotDateTo : nil,
-            xmpSinceFilter: s.useXmpSince ? s.xmpSinceDate : nil
+            xmpSinceFilter: s.useXmpSince ? s.xmpSinceDate : nil,
+            seasonMonths: SeasonSettings.shared.months(forSeasons: s.selectedSeasons)
         )
     }
 

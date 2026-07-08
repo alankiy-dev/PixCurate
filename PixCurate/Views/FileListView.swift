@@ -68,9 +68,20 @@ struct FileListView: View {
                                 selection = [file.id]
                                 openViewer(file, nil)
                             }
-                            .onTapGesture {
-                                handleTap(file)
-                            }
+                            // シングルクリックの選択は「マウスアップ即時」で反映する。
+                            // onTapGesture(count:1) だとダブルクリック判定待ちで
+                            // 0.25〜0.5秒遅れるため、0距離ドラッグで待ち時間を回避する。
+                            // （macOSのスクロールはホイール/2本指なのでこのジェスチャーと競合しない）
+                            .simultaneousGesture(
+                                DragGesture(minimumDistance: 0)
+                                    .onEnded { value in
+                                        // ほぼ動いていない＝クリックとみなす（ドラッグ選択は除外）
+                                        if abs(value.translation.width) < 6,
+                                           abs(value.translation.height) < 6 {
+                                            handleTap(file)
+                                        }
+                                    }
+                            )
                             .contextMenu { cellContextMenu(for: file) }
                     }
                 }
