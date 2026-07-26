@@ -433,18 +433,19 @@ class FileListViewModel {
                 isIndexing = false
                 // 途中でコレクション表示に切り替わっていたら上書きしない
                 guard !isCollectionMode else { return }
+                // 変更が無ければ一覧を作り直さない（クリック応答やスクロールが重くなるのを防ぐ）
+                guard result.added > 0 || result.updated > 0 || result.removed > 0 else {
+                    indexStatus = "DB: \(files.count)件"
+                    return
+                }
                 allFiles = files
                 applyFilter(minRating: self.minRating, ratingMode: ratingFilterMode)
-                if result.added > 0 || result.updated > 0 || result.removed > 0 {
-                    let parts = [
-                        result.added   > 0 ? "新規\(result.added)件"   : nil,
-                        result.updated > 0 ? "更新\(result.updated)件" : nil,
-                        result.removed > 0 ? "削除\(result.removed)件" : nil,
-                    ].compactMap { $0 }.joined(separator: " / ")
-                    indexStatus = "DB: \(files.count)件（\(parts)）"
-                } else {
-                    indexStatus = "DB: \(files.count)件"
-                }
+                let parts = [
+                    result.added   > 0 ? "新規\(result.added)件"   : nil,
+                    result.updated > 0 ? "更新\(result.updated)件" : nil,
+                    result.removed > 0 ? "削除\(result.removed)件" : nil,
+                ].compactMap { $0 }.joined(separator: " / ")
+                indexStatus = "DB: \(files.count)件（\(parts)）"
             }
         }
     }

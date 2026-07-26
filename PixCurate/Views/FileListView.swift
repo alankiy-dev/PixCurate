@@ -25,6 +25,8 @@ struct FileListView: View {
     @Environment(\.openWindow) var openWindow
     @State private var exifTarget: PhotoFile?
     @State private var gridColumnCount: Int = 4   // 矢印キー移動用・幅測定で随時更新
+    /// 直近の選択変更がキーボード移動由来か。マウスクリックでは中央スクロールしない（クリックのカクつき防止）
+    @State private var selectionFromKeyboard = false
 
     private var columns: [GridItem] {
         [GridItem(.adaptive(minimum: settings.thumbSize.width,
@@ -97,7 +99,10 @@ struct FileListView: View {
             .focusable()
             .onKeyPress(phases: .down) { handleKeyPress($0) }
             .onChange(of: selection) { _, newSel in
-                // キーボード移動時のみスクロール追従（単一選択かつ矢印操作の結果）
+                // キーボード移動時のみスクロール追従。マウスクリックでは追従しない
+                // （クリックのたびに中央へアニメーションスクロールして重く感じるのを防ぐ）
+                guard selectionFromKeyboard else { return }
+                selectionFromKeyboard = false
                 if newSel.count == 1, let id = newSel.first {
                     withAnimation(.easeInOut(duration: 0.15)) {
                         proxy.scrollTo(id, anchor: .center)
@@ -444,6 +449,9 @@ struct FileListView: View {
     private func moveGridSelection(by delta: Int) -> KeyPress.Result {
         guard !files.isEmpty else { return .ignored }
 
+        // キーボード移動：選択セルを中央スクロールで追従させる
+        selectionFromKeyboard = true
+
         // 未選択なら先頭 or 末尾を選択
         guard let currentId = selection.first,
               let currentIdx = files.firstIndex(where: { $0.id == currentId }) else {
@@ -460,6 +468,8 @@ struct FileListView: View {
     // MARK: - Tap handling (grid only)
 
     private func handleTap(_ file: PhotoFile) {
+        // マウス操作なので中央スクロール追従はしない
+        selectionFromKeyboard = false
         if NSEvent.modifierFlags.contains(.command) {
             if selection.contains(file.id) {
                 selection.remove(file.id)
