@@ -52,6 +52,7 @@ private enum Keys {
     static let fileTypeFilter           = "pixcurate.fileTypeFilter"
     static let tabFilters               = "pixcurate.tabFilters"
     static let formatFilterExpanded     = "pixcurate.filter.format.expanded"
+    static let filenameFilterExpanded   = "pixcurate.filter.filename.expanded"
     static let folderExpanded           = "pixcurate.folder.expanded"
     static let filterExpanded           = "pixcurate.filter.section.expanded"
     static let collectionExpanded       = "pixcurate.collection.expanded"
@@ -101,6 +102,7 @@ struct FilterSpec {
     var shotDateTo: Date? = nil
     var xmpSinceFilter: Date? = nil
     var seasonMonths: Set<Int> = []            // 空なら季節フィルターなし。非空なら撮影月がこの集合に含まれること
+    var filenamePattern: String = ""           // 空なら無効。ファイル名の部分一致／ワイルドカード（* ?）検索
 }
 
 /// 1タブ分のフィルター条件をまとめて保持する。タブごとに独立して保持・計算する。
@@ -119,6 +121,7 @@ struct TabFilterState {
     var xmpSinceDate: Date
     var activePresetId: UUID?
     var selectedSeasons: Set<Season> = []
+    var filenamePattern: String = ""
 }
 
 /// TabFilterState の永続化用 DTO（rawValue/プリミティブのみで Codable）
@@ -137,6 +140,7 @@ struct TabFilterDTO: Codable {
     var xmpSinceDate: Date
     var presetId: String?
     var seasons: [String] = []
+    var filenamePattern: String = ""
 
     init(_ s: TabFilterState) {
         minRating    = s.minRating
@@ -153,6 +157,7 @@ struct TabFilterDTO: Codable {
         xmpSinceDate = s.xmpSinceDate
         presetId     = s.activePresetId?.uuidString
         seasons      = s.selectedSeasons.map { $0.rawValue }
+        filenamePattern = s.filenamePattern
     }
 
     // seasons は後から追加した項目。旧データ（キー無し）でも壊れないよう decodeIfPresent で許容する
@@ -172,6 +177,7 @@ struct TabFilterDTO: Codable {
         xmpSinceDate = try c.decode(Date.self, forKey: .xmpSinceDate)
         presetId     = try c.decodeIfPresent(String.self, forKey: .presetId)
         seasons      = try c.decodeIfPresent([String].self, forKey: .seasons) ?? []
+        filenamePattern = try c.decodeIfPresent(String.self, forKey: .filenamePattern) ?? ""
     }
 
     var state: TabFilterState {
@@ -191,7 +197,8 @@ struct TabFilterDTO: Codable {
             useXmpSince: useXmpSince,
             xmpSinceDate: xmpSinceDate,
             activePresetId: presetId.flatMap { UUID(uuidString: $0) },
-            selectedSeasons: Set(seasons.compactMap { Season(rawValue: $0) })
+            selectedSeasons: Set(seasons.compactMap { Season(rawValue: $0) }),
+            filenamePattern: filenamePattern
         )
     }
 }
@@ -283,8 +290,11 @@ class FileListViewModel {
                 }
             }
 
-            // 2. バックグラウンドで差分スキャン
-            let (files, scanResult) = IndexService.fullScan(sources: sources)
+            // 2. バックグラウンドで差分スキャン（フォルダ更新日時で高速化）
+            let scanStart = Date()
+            let (files, scanResult) = IndexService.fastScan(sources: sources,
+                                                            since: IndexService.lastScanDate)
+            IndexService.lastScanDate = scanStart
 
             await MainActor.run { [weak self] in
                 guard let self else { return }
@@ -370,16 +380,28 @@ class FileListViewModel {
         }
     }
 
-    // MARK: - 再スキャン（強制フルスキャン）
+    // MARK: - 再スキャン
 
+    /// 通常の再スキャン。フォルダ更新日時で枝刈りする高速版（触ったフォルダだけ読み直す）。
     func rescan(sources: [SourceSpec], minRating: Int) {
+        runScan(sources: sources, since: IndexService.lastScanDate, label: "再スキャン中…")
+    }
+
+    /// 完全再スキャン。すべてのフォルダを対象に全ファイルを読み直す（高速版で取りこぼした場合の確実版）。
+    func fullRescan(sources: [SourceSpec]) {
+        runScan(sources: sources, since: .distantPast, label: "完全再スキャン中…")
+    }
+
+    private func runScan(sources: [SourceSpec], since: Date, label: String) {
         guard !isIndexing, !sources.isEmpty else { return }
         isIndexing = true
-        indexStatus = "再スキャン中…"
+        indexStatus = label
         Task { await ThumbnailService.resetFailedURLs() }
 
         Task.detached {
-            let (files, result) = IndexService.fullScan(sources: sources)
+            let scanStart = Date()
+            let (files, result) = IndexService.fastScan(sources: sources, since: since)
+            IndexService.lastScanDate = scanStart
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 isIndexing = false
@@ -402,8 +424,10 @@ class FileListViewModel {
         indexStatus = "DB再構築中…"
 
         Task.detached {
+            let scanStart = Date()
             for spec in sources { DatabaseService.shared.deleteAll(under: spec.url) }
-            let (files, result) = IndexService.fullScan(sources: sources)
+            let (files, _) = IndexService.fullScan(sources: sources)
+            IndexService.lastScanDate = scanStart   // 再構築後の高速スキャン基準を更新
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 allFiles = files
@@ -417,9 +441,9 @@ class FileListViewModel {
 
     // MARK: - メタデータ自動更新（他アプリ復帰時）
 
-    /// 変更されたXMPだけを軽く再スキャンして★・タグ等を画面へ反映する。
-    /// フルスキャンと同じ差分検出（XMP更新日時の比較）を使うため、
-    /// 実際にXMPを読み直すのは変わったファイルだけ。Bridge等での編集から戻ったときに反映する。
+    /// 変更されたフォルダだけを高速スキャンして★・タグ等を画面へ反映する。
+    /// フォルダ更新日時で枝刈りするため、変わっていない大量のファイルには触れない。
+    /// Bridge等での編集から戻ったときに反映する。
     func refreshChangedMetadata(sources: [SourceSpec]) {
         // 読み込み中・スキャン中・コピー中・コレクション表示中は走らせない
         guard !isIndexing, !isLoading, !isRunning, !isCollectionMode, !sources.isEmpty else { return }
@@ -427,7 +451,10 @@ class FileListViewModel {
         indexStatus = "更新を確認中…"
 
         Task.detached {
-            let (files, result) = IndexService.fullScan(sources: sources)
+            let scanStart = Date()
+            let (files, result) = IndexService.fastScan(sources: sources,
+                                                        since: IndexService.lastScanDate)
+            IndexService.lastScanDate = scanStart
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 isIndexing = false
@@ -458,6 +485,7 @@ class FileListViewModel {
     var fileTypeFilter: FileTypeFilter = .rawOnly
     var annualFilterDays: Int? = nil   // nilなら無効。非nilのとき例年の今頃フィルターが有効
     var seasonMonths: Set<Int> = []    // 空なら季節フィルターなし
+    var filenamePattern: String = ""   // 空なら無効。ファイル名の部分一致／ワイルドカード検索
 
     // MARK: - Collection mode
     var isCollectionMode: Bool = false
@@ -575,7 +603,8 @@ class FileListViewModel {
             shotDateFrom: shotDateFrom,
             shotDateTo: shotDateTo,
             xmpSinceFilter: xmpSinceFilter,
-            seasonMonths: seasonMonths
+            seasonMonths: seasonMonths,
+            filenamePattern: filenamePattern
         )
     }
 
@@ -644,7 +673,33 @@ class FileListViewModel {
         } else {
             seasonOK = false
         }
-        return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK && seasonOK
+        let nameOK = filenameMatches(file.rawURL.deletingPathExtension().lastPathComponent,
+                                     pattern: spec.filenamePattern)
+        return ratingOK && colorLabelOK && tagOK && locationOK && shotDateOK && xmpOK && seasonOK && nameOK
+    }
+
+    /// ファイル名（拡張子を除く）がパターンに一致するか。
+    /// - ワイルドカードなし（例 "4334"）→ 部分一致（含む）
+    /// - `*`（0文字以上）／`?`（任意1文字）を含む場合 → 全体一致の正規表現に変換
+    ///   例）"*4334"=後方一致（〜で終わる）、"4334*"=前方一致、"43?4"=1文字任意
+    /// すべて大文字小文字を区別しない。
+    nonisolated static func filenameMatches(_ name: String, pattern: String) -> Bool {
+        let p = pattern.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !p.isEmpty else { return true }
+        let lowerName = name.lowercased()
+        if !p.contains("*") && !p.contains("?") {
+            return lowerName.contains(p)
+        }
+        var regex = "^"
+        for ch in p {
+            switch ch {
+            case "*": regex += ".*"
+            case "?": regex += "."
+            default:  regex += NSRegularExpression.escapedPattern(for: String(ch))
+            }
+        }
+        regex += "$"
+        return lowerName.range(of: regex, options: .regularExpression) != nil
     }
 
     func applyFilter(minRating: Int, ratingMode: RatingFilterMode = .atLeast) {
@@ -786,6 +841,10 @@ struct ContentView: View {
             .compactMap { Season(rawValue: $0) }
     )
     @State private var showSeasonSettings = false
+    /// ファイル名検索：入力欄の文字列（検索ボタンで確定するまで適用しない）
+    @State private var filenameInput: String = ""
+    /// 実際に適用中のファイル名パターン（タブ保存・復元対象）
+    @State private var filenamePattern: String = ""
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var showDisplaySettings = false
     @State private var showCopyConfirm = false
@@ -809,6 +868,7 @@ struct ContentView: View {
         ?? Calendar.current.startOfDay(for: Date())
     @State private var presetExpanded        = UserDefaults.standard.object(forKey: Keys.presetExpanded)        as? Bool ?? true
     @State private var formatFilterExpanded  = UserDefaults.standard.object(forKey: Keys.formatFilterExpanded)  as? Bool ?? true
+    @State private var filenameFilterExpanded = UserDefaults.standard.object(forKey: Keys.filenameFilterExpanded) as? Bool ?? true
     @State private var activePresetId: UUID?
     @State private var showSavePreset = false
     @State private var presetName = ""
@@ -834,6 +894,7 @@ struct ContentView: View {
     @Environment(DisplaySettings.self) private var displaySettings
     @Environment(FilterPresetStore.self) private var presetStore
     @Environment(CollectionStore.self) private var collectionStore
+    @Environment(WorkflowStore.self) private var workflow
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
@@ -921,6 +982,10 @@ struct ContentView: View {
         .onReceive(NotificationCenter.default.publisher(for: .rescanRequested)) { _ in
             let specs = sourceFolderStore.onlineSpecs
             if !specs.isEmpty { vm.rescan(sources: specs, minRating: minRating) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .fullRescanRequested)) { _ in
+            let specs = sourceFolderStore.onlineSpecs
+            if !specs.isEmpty { vm.fullRescan(sources: specs) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .rebuildRequested)) { _ in
             if !sourceFolderStore.folders.isEmpty { showRebuildConfirm = true }
@@ -1091,11 +1156,52 @@ struct ContentView: View {
                         }
                         .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
-                        filterLabel("フォーマット", icon: "photo.stack", color: .cyan)
+                        filterLabel("フォーマット", icon: "photo.stack", color: .cyan,
+                                    active: formatFilterActive, summary: formatFilterSummary)
                     }
                     .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: formatFilterExpanded) { _, v in
                         UserDefaults.standard.set(v, forKey: Keys.formatFilterExpanded)
+                    }
+
+                    // ファイル名検索
+                    DisclosureGroup(isExpanded: $filenameFilterExpanded) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                TextField("例: 4334, *4334, DSC?123", text: $filenameInput)
+                                    .textFieldStyle(.roundedBorder)
+                                    .onSubmit { applyFilenameSearch() }
+                                Button {
+                                    applyFilenameSearch()
+                                } label: {
+                                    Image(systemName: "magnifyingglass")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .help("ファイル名で検索")
+                                if !filenamePattern.isEmpty {
+                                    Button {
+                                        filenameInput = ""
+                                        applyFilenameSearch()
+                                    } label: {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.borderless)
+                                    .help("ファイル名検索を解除")
+                                }
+                            }
+                            Text("部分一致。* は任意の文字列、? は任意の1文字。")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.vertical, SidebarLayout.itemVPad)
+                    } label: {
+                        filterLabel("ファイル名", icon: "textformat.abc", color: .indigo,
+                                    active: filenameFilterActive, summary: filenamePattern)
+                    }
+                    .listRowInsets(SidebarLayout.rowInsets)
+                    .onChange(of: filenameFilterExpanded) { _, v in
+                        UserDefaults.standard.set(v, forKey: Keys.filenameFilterExpanded)
                     }
 
                     // 評価
@@ -1112,7 +1218,8 @@ struct ContentView: View {
                         }
                         .padding(.vertical, 2)
                     } label: {
-                        filterLabel("評価", icon: "star.fill", color: .yellow)
+                        filterLabel("評価", icon: "star.fill", color: .yellow,
+                                    active: ratingFilterActive, summary: ratingFilterSummary)
                     }
                     .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: ratingFilterExpanded) { _, v in
@@ -1131,7 +1238,8 @@ struct ContentView: View {
                                 onChange: { applyTagFilter() }
                             )
                         } label: {
-                            filterLabel("タグ", icon: "tag.fill", color: .blue)
+                            filterLabel("タグ", icon: "tag.fill", color: .blue,
+                                        active: tagFilterActive, summary: tagFilterSummary)
                         }
                         .listRowInsets(SidebarLayout.rowInsets)
                         .onChange(of: tagFilterExpanded) { _, v in
@@ -1148,7 +1256,8 @@ struct ContentView: View {
                                 onChange: { applyLocationFilter() }
                             )
                         } label: {
-                            filterLabel("撮影地", icon: "mappin.and.ellipse", color: .red)
+                            filterLabel("撮影地", icon: "mappin.and.ellipse", color: .red,
+                                        active: locationFilterActive, summary: locationFilterSummary)
                         }
                         .listRowInsets(SidebarLayout.rowInsets)
                         .onChange(of: locationFilterExpanded) { _, v in
@@ -1290,7 +1399,8 @@ struct ContentView: View {
                         }
                         .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
-                        filterLabel("撮影日", icon: "camera", color: .teal)
+                        filterLabel("撮影日", icon: "camera", color: .teal,
+                                    active: shotDateFilterActive, summary: shotDateFilterSummary)
                     }
                     .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: shotDateFilterExpanded) { _, v in
@@ -1323,7 +1433,8 @@ struct ContentView: View {
                         }
                         .padding(.vertical, SidebarLayout.itemVPad)
                     } label: {
-                        filterLabel("更新日", icon: "calendar.badge.clock", color: .orange)
+                        filterLabel("更新日", icon: "calendar.badge.clock", color: .orange,
+                                    active: xmpFilterActive, summary: xmpFilterSummary)
                     }
                     .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: xmpFilterExpanded) { _, v in
@@ -1401,7 +1512,8 @@ struct ContentView: View {
                             Text("現在の評価・タグ・撮影地フィルターを保存します")
                         }
                     } label: {
-                        filterLabel("プリセット", icon: "bookmark.fill", color: .indigo)
+                        filterLabel("プリセット", icon: "bookmark.fill", color: .indigo,
+                                    active: presetFilterActive, summary: presetFilterSummary)
                     }
                     .listRowInsets(SidebarLayout.rowInsets)
                     .onChange(of: presetExpanded) { _, v in
@@ -1701,7 +1813,8 @@ struct ContentView: View {
                 }
             }
         } label: {
-            filterLabel("カラーラベル", icon: "circle.fill", color: .pink)
+            filterLabel("カラーラベル", icon: "circle.fill", color: .pink,
+                        active: colorLabelFilterActive, summary: colorLabelFilterSummary)
         }
         .listRowInsets(SidebarLayout.rowInsets)
     }
@@ -1725,36 +1838,106 @@ struct ContentView: View {
 
     /// レベル1：フォルダ/フィルター/コレクション/コピー
     private func collapsibleHeader(_ title: String, color: Color, expanded: Bool, toggle: @escaping () -> Void, key: String, trailing: (() -> AnyView)? = nil) -> some View {
+        // セクション見出しは無色（グレー系）で落ち着かせる。区切りの帯は薄い無色。
+        // color は各項目アイコン側で情報として使うため、見出しでは使わない。
         HStack(spacing: 4) {
             Text(title)
                 .font(.title3)
                 .fontWeight(.bold)
                 .textCase(nil)
-                .foregroundStyle(color)
+                .foregroundStyle(.secondary)
             Spacer()
             if let trailing { trailing() }
             Button { toggle() } label: {
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
                     .font(.callout)
-                    .foregroundStyle(color.opacity(0.7))
+                    .foregroundStyle(.secondary)
             }
             .buttonStyle(.borderless)
         }
         .padding(.vertical, SidebarLayout.headerVPad)
-        .background(color.opacity(0.10).padding(.horizontal, -50))
+        .background(Color.secondary.opacity(0.08).padding(.horizontal, -50))
     }
 
     /// レベル2：評価/タグ/撮影地/撮影日/更新日/プリセット（DisclosureGroup ラベル）
-    private func filterLabel(_ title: String, icon: String, color: Color) -> some View {
-        Label {
+    /// 条件見出し。普段はアイコン＝グレー・通常ウェイトで静か。
+    /// その条件を使用中のときだけ、アイコンに色・右端に要約・アクセントのドットと薄い背景を出す。
+    private func filterLabel(_ title: String, icon: String, color: Color,
+                            active: Bool = false, summary: String = "") -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(active ? color : Color.secondary)
+                .frame(width: 18, alignment: .center)
             Text(title)
                 .font(.body)
-                .fontWeight(.semibold)
                 .foregroundStyle(.primary)
-        } icon: {
-            Image(systemName: icon)
-                .foregroundStyle(color)
+            Spacer(minLength: 4)
+            if active, !summary.isEmpty {
+                Text(summary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            if active {
+                Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+            }
         }
+        .padding(.vertical, 2)
+        .background((active ? Color.accentColor.opacity(0.08) : Color.clear)
+            .padding(.horizontal, -50))
+    }
+
+    // MARK: - 各条件のアクティブ判定と要約（見出しに表示）
+
+    private var formatFilterActive: Bool { fileTypeFilter != .rawOnly }
+    private var formatFilterSummary: String {
+        switch fileTypeFilter {
+        case .rawOnly:  return ""
+        case .jpegOnly: return "JPEG"
+        case .both:     return "RAW+JPEG"
+        }
+    }
+    private var filenameFilterActive: Bool { !filenamePattern.isEmpty }
+    private var ratingFilterActive: Bool { minRating > 0 || ratingFilterMode == .exactly }
+    private var ratingFilterSummary: String {
+        if minRating == 0 && ratingFilterMode == .exactly { return "未評価" }
+        guard minRating > 0 else { return "" }
+        return "★\(minRating)\(ratingFilterMode == .exactly ? "のみ" : "以上")"
+    }
+    private var tagFilterActive: Bool { filterGroups.contains { !$0.tagNames.isEmpty } }
+    private var tagFilterSummary: String {
+        let n = filterGroups.reduce(0) { $0 + $1.tagNames.count }
+        return n > 0 ? "\(n)個" : ""
+    }
+    private var locationFilterActive: Bool { !selectedLocationIds.isEmpty }
+    private var locationFilterSummary: String { selectedLocationIds.isEmpty ? "" : "\(selectedLocationIds.count)件" }
+    private var colorLabelFilterActive: Bool { !selectedColorLabels.isEmpty }
+    private var colorLabelFilterSummary: String { selectedColorLabels.isEmpty ? "" : "\(selectedColorLabels.count)色" }
+    private var shotDateFilterActive: Bool { dateFilterMode != .off || !selectedSeasons.isEmpty }
+    private var shotDateFilterSummary: String {
+        var parts: [String] = []
+        let seasons = Season.allCases.filter { selectedSeasons.contains($0) }.map { $0.label }
+        if !seasons.isEmpty { parts.append(seasons.joined(separator: "・")) }
+        switch dateFilterMode {
+        case .annual: parts.append("例年")
+        case .range:  parts.append("期間")
+        case .off:    break
+        }
+        return parts.joined(separator: " ")
+    }
+    private var xmpFilterActive: Bool { useXmpSince }
+    private var xmpFilterSummary: String {
+        guard useXmpSince else { return "" }
+        let f = DateFormatter()
+        f.dateFormat = "M/d"
+        return f.string(from: xmpSinceDate) + "〜"
+    }
+    private var presetFilterActive: Bool { activePresetId != nil }
+    private var presetFilterSummary: String {
+        guard let id = activePresetId,
+              let p = presetStore.presets.first(where: { $0.id == id }) else { return "" }
+        return p.name
     }
 
     /// sectionHeader は filterLabel に統合済み（旧互換用・不使用）
@@ -2143,6 +2326,7 @@ struct ContentView: View {
         vm.fileTypeFilter = fileTypeFilter
         vm.ratingFilterMode = ratingFilterMode
         vm.seasonMonths = SeasonSettings.shared.months(forSeasons: selectedSeasons)
+        vm.filenamePattern = filenamePattern
         switch dateFilterMode {
         case .off:
             vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
@@ -2183,8 +2367,23 @@ struct ContentView: View {
         || !selectedLocationIds.isEmpty
         || dateFilterMode != .off
         || !selectedSeasons.isEmpty
+        || !filenamePattern.isEmpty
         || useXmpSince
         || activePresetId != nil
+    }
+
+    /// ファイル名検索を実行（検索ボタン／Return）。入力欄の内容を確定して適用する。
+    private func applyFilenameSearch() {
+        filenamePattern = filenameInput.trimmingCharacters(in: .whitespaces)
+        vm.filenamePattern = filenamePattern
+        vm.applyFilter(minRating: minRating, ratingMode: ratingFilterMode)
+        clearActivePreset()
+        persistActiveTabFilter()
+    }
+
+    /// 選択中ファイルの RAW URL 群（ワークフロー起動用）
+    private func selectedRawURLs() -> [URL] {
+        filesForActiveTab.filter { selection.contains($0.id) }.map(\.rawURL)
     }
 
     /// 季節フィルターを VM に反映して再適用（＋保存）
@@ -2211,8 +2410,10 @@ struct ContentView: View {
             useXmpSince: false,
             xmpSinceDate: xmpSinceDate,
             activePresetId: nil,
-            selectedSeasons: []
+            selectedSeasons: [],
+            filenamePattern: ""
         )
+        filenameInput = ""
         restoreFilterState(cleared)
         persistActiveTabFilter()
         UserDefaults.standard.set(0, forKey: Keys.minRating)
@@ -2235,7 +2436,8 @@ struct ContentView: View {
             useXmpSince: useXmpSince,
             xmpSinceDate: xmpSinceDate,
             activePresetId: activePresetId,
-            selectedSeasons: selectedSeasons
+            selectedSeasons: selectedSeasons,
+            filenamePattern: filenamePattern
         )
     }
 
@@ -2257,6 +2459,8 @@ struct ContentView: View {
         xmpSinceDate        = s.xmpSinceDate
         activePresetId      = s.activePresetId
         selectedSeasons     = s.selectedSeasons
+        filenamePattern     = s.filenamePattern
+        filenameInput       = s.filenamePattern
         pushFiltersToVMAndApply()
     }
 
@@ -2269,6 +2473,7 @@ struct ContentView: View {
         vm.ratingFilterMode = ratingFilterMode
         vm.colorLabelFilter = selectedColorLabels
         vm.seasonMonths     = SeasonSettings.shared.months(forSeasons: selectedSeasons)
+        vm.filenamePattern  = filenamePattern
         switch dateFilterMode {
         case .off:
             vm.annualFilterDays = nil; vm.shotDateFrom = nil; vm.shotDateTo = nil
@@ -2307,7 +2512,8 @@ struct ContentView: View {
             shotDateFrom: s.dateFilterMode == .range ? s.shotDateFrom : nil,
             shotDateTo:   s.dateFilterMode == .range ? s.shotDateTo : nil,
             xmpSinceFilter: s.useXmpSince ? s.xmpSinceDate : nil,
-            seasonMonths: SeasonSettings.shared.months(forSeasons: s.selectedSeasons)
+            seasonMonths: SeasonSettings.shared.months(forSeasons: s.selectedSeasons),
+            filenamePattern: s.filenamePattern
         )
     }
 
@@ -2722,6 +2928,37 @@ struct ContentView: View {
                         }
                         .buttonStyle(.borderless)
                         .help("拡大表示")
+
+                        Divider().frame(height: 14)
+
+                        // ワークフロー：編集／プリント（選択中に対して）
+                        Button {
+                            workflow.openForEdit(selectedRawURLs())
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "slider.horizontal.3").font(.system(size: 12))
+                                Text("編集").font(.caption)
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .help(workflow.editAppURL != nil
+                              ? "選択画像を「\(workflow.displayName(workflow.editAppURL) ?? "編集アプリ")」で開く"
+                              : "編集アプリ未設定（右クリック→編集アプリを設定）")
+                        .disabled(workflow.editAppURL == nil)
+
+                        Button {
+                            workflow.openForPrint(selectedRawURLs())
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "printer").font(.system(size: 12))
+                                Text("プリント").font(.caption)
+                            }
+                        }
+                        .buttonStyle(.borderless)
+                        .help(workflow.printAppURL != nil
+                              ? "選択画像（現像後JPEG優先）を「\(workflow.displayName(workflow.printAppURL) ?? "プリントアプリ")」で開く"
+                              : "プリントアプリ未設定（右クリック→プリントアプリを設定）")
+                        .disabled(workflow.printAppURL == nil)
                     }
                     if !vm.filteredFiles.isEmpty {
                         Button {

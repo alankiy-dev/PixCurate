@@ -22,6 +22,7 @@ struct FileListView: View {
     var thumbnailRefreshToken: Int = 0
 
     @Environment(DisplaySettings.self) var settings
+    @Environment(WorkflowStore.self) var workflow
     @Environment(\.openWindow) var openWindow
     @State private var exifTarget: PhotoFile?
     @State private var gridColumnCount: Int = 4   // 矢印キー移動用・幅測定で随時更新
@@ -224,6 +225,9 @@ struct FileListView: View {
 
     @ViewBuilder
     private func cellContextMenu(for file: PhotoFile) -> some View {
+        // ワークフロー（編集／プリント）を最上部に
+        workflowMenuItems(for: file)
+        Divider()
         Button { exifTarget = file } label: {
             Label("情報を表示", systemImage: "info.circle")
         }
@@ -341,6 +345,37 @@ struct FileListView: View {
                 Button("ほかのアプリを選択…") { chooseApplicationAndOpen(urls) }
             }
         )
+    }
+
+    // MARK: - ワークフロー（編集／プリント）
+
+    /// 右クリックには「編集／プリントの起動（アプリ名付き）」だけを置く。
+    /// アプリの設定・変更・解除はアプリのメニュー（ツール → ワークフローアプリ）で行う。
+    @ViewBuilder
+    private func workflowMenuItems(for file: PhotoFile) -> some View {
+        let rawURLs = contextTargets(for: file).map(\.rawURL)
+
+        if let app = workflow.editAppURL {
+            Button {
+                workflow.openForEdit(rawURLs)
+            } label: {
+                Label("編集：\(workflow.displayName(app) ?? "アプリ")で開く", systemImage: "slider.horizontal.3")
+            }
+        } else {
+            Button {} label: { Label("編集アプリ未設定", systemImage: "slider.horizontal.3") }
+                .disabled(true)
+        }
+
+        if let app = workflow.printAppURL {
+            Button {
+                workflow.openForPrint(rawURLs)
+            } label: {
+                Label("プリント：\(workflow.displayName(app) ?? "アプリ")で開く", systemImage: "printer")
+            }
+        } else {
+            Button {} label: { Label("プリントアプリ未設定", systemImage: "printer") }
+                .disabled(true)
+        }
     }
 
     /// インストール済みの現像系アプリを名前で探す（型登録に依存せず検出する）。

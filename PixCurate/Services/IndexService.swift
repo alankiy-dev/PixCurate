@@ -11,6 +11,13 @@ enum IndexService {
         var removed: Int      // ディスクから消えた件数
     }
 
+    /// 最終スキャン日時（フォルダ更新日時による高速スキャンの基準）。
+    /// これより後に更新されたフォルダだけを実際に読み直す。
+    nonisolated static var lastScanDate: Date {
+        get { (UserDefaults.standard.object(forKey: "pixcurate.lastScanDate") as? Date) ?? .distantPast }
+        set { UserDefaults.standard.set(newValue, forKey: "pixcurate.lastScanDate") }
+    }
+
     // MARK: - DBから即ロード
 
     /// 拡大表示ウィンドウ用：指定URLファイルの評価をXMPから読み込む
@@ -69,7 +76,7 @@ enum IndexService {
             return ([], ScanResult(loaded: 0, added: 0, updated: 0, removed: 0))
         }
 
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "cr2", "jpg", "jpeg"]
         let fm = FileManager.default
         var diskPaths = Set<String>()
         var allURLs: [URL] = []
@@ -167,6 +174,110 @@ enum IndexService {
         return (scanned, result)
     }
 
+    // MARK: - 高速スキャン（フォルダ更新日時で枝刈り）
+
+    /// `since` より後に更新されたフォルダのファイルだけを実際に読み直す差分スキャン。
+    /// 変更のないフォルダは XMP を stat せず DB の内容をそのまま流用するため、
+    /// 大量ファイル（外付け/NAS）でも「触ったフォルダ分」だけの処理で済み、大幅に高速化する。
+    ///
+    /// - Note: 判定はフォルダの更新日時。ファイルの追加・削除・リネームや、
+    ///   一時ファイル＋リネーム方式で保存されるXMP（Adobe系など）はフォルダ日時が変わるため検出できる。
+    ///   ごく稀に「XMPをその場上書き（リネームなし）」する場合は取りこぼす可能性があるため、
+    ///   確実に反映したいときは「完全再スキャン」（since=distantPast）や DB再構築 を使う。
+    nonisolated static func fastScan(
+        sources: [SourceSpec],
+        since: Date,
+        progress: @Sendable (Int, Int) -> Void = { _, _ in }
+    ) -> (files: [PhotoFile], result: ScanResult) {
+        guard !sources.isEmpty else {
+            return ([], ScanResult(loaded: 0, added: 0, updated: 0, removed: 0))
+        }
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "cr2", "jpg", "jpeg"]
+        let fm = FileManager.default
+        let locStore = LocationStore.shared
+
+        // ベース：DBの全行（変更のないフォルダ分はこれをそのまま使う）
+        var byPath: [String: PhotoFile] = [:]
+        for f in loadFromDB(sources: sources) { byPath[f.rawURL.path] = f }
+
+        // DBに登録済みのフォルダ集合。ここに無いフォルダ（新規追加したコピー元など）は
+        // 更新日時が古くても必ずスキャンする（枝刈り対象にしない）。
+        var dbDirs = Set<String>()
+        for path in byPath.keys {
+            dbDirs.insert(URL(fileURLWithPath: path).deletingLastPathComponent().path)
+        }
+
+        // ディスク上のRAW一覧（重複除去）
+        var diskURLs: [URL] = []
+        var seenDisk = Set<String>()
+        for spec in sources {
+            for url in collectURLs(in: spec, extensions: rawExtensions, fm: fm)
+            where seenDisk.insert(url.path).inserted {
+                diskURLs.append(url)
+            }
+        }
+
+        // フォルダ更新日時のキャッシュ（1フォルダ1回だけ stat）
+        var dirMtimeCache: [String: Bool] = [:]
+        func dirChanged(_ dir: String) -> Bool {
+            if let c = dirMtimeCache[dir] { return c }
+            // DB未登録のフォルダ（新規追加コピー元など）は日時に関わらず必ずスキャン
+            let unknown = !dbDirs.contains(dir)
+            let mod = ((try? fm.attributesOfItem(atPath: dir))?[.modificationDate] as? Date) ?? .distantPast
+            let changed = unknown || mod > since
+            dirMtimeCache[dir] = changed
+            return changed
+        }
+
+        let total = diskURLs.count
+        var added = 0, updated = 0
+        var changedDirs = Set<String>()
+        var seenInChangedDirs = Set<String>()
+
+        for (i, url) in diskURLs.enumerated() {
+            progress(i + 1, total)
+            let path = url.path
+            let dir = url.deletingLastPathComponent().path
+            // 変更のないフォルダ → DB行をそのまま流用（XMPを読まない）
+            guard dirChanged(dir) else { continue }
+            changedDirs.insert(dir)
+            seenInChangedDirs.insert(path)
+
+            let isNew = byPath[path] == nil
+            var file = PhotoFile(rawURL: url)
+            let xmpURL = file.xmpURL
+            var xmpMod: Date? = nil
+            if fm.fileExists(atPath: xmpURL.path) {
+                file.rating       = XMPService.readRating(xmpURL: xmpURL)
+                file.tags         = XMPTagService.readTags(xmpURL: xmpURL)
+                file.locationPath = XMPLocationService.readLocation(xmpURL: xmpURL)
+                file.colorLabel   = XMPService.readColorLabel(xmpURL: xmpURL)
+                xmpMod = (try? fm.attributesOfItem(atPath: xmpURL.path))?[.modificationDate] as? Date
+            }
+            file.shotDate = EXIFService.readShotDate(url: url)
+                ?? (try? fm.attributesOfItem(atPath: path))?[.modificationDate] as? Date
+            if let lp = file.locationPath { file.locationId = locStore.match(path: lp) }
+            file.xmpModifiedAt = xmpMod
+            DatabaseService.shared.upsert(file, xmpModifiedAt: xmpMod)
+            byPath[path] = file
+            if isNew { added += 1 } else { updated += 1 }
+        }
+
+        // 変更のあったフォルダ内で、ディスクから消えたファイルをDBから削除
+        var removed = 0
+        for path in Array(byPath.keys) {
+            let dir = URL(fileURLWithPath: path).deletingLastPathComponent().path
+            if changedDirs.contains(dir), !seenInChangedDirs.contains(path) {
+                DatabaseService.shared.delete(path: path)
+                byPath[path] = nil
+                removed += 1
+            }
+        }
+
+        let scanned = byPath.values.sorted { $0.filename < $1.filename }
+        return (scanned, ScanResult(loaded: 0, added: added, updated: updated, removed: removed))
+    }
+
     /// 1フォルダ内のRAWファイルURLを収集（recursive/非recursive 対応）
     private nonisolated static func collectURLs(
         in spec: SourceSpec,
@@ -201,7 +312,7 @@ enum IndexService {
         progress: @Sendable (Int, Int) -> Void = { _, _ in }
     ) -> (files: [PhotoFile], result: ScanResult) {
 
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "cr2", "jpg", "jpeg"]
         let fm = FileManager.default
         let locStore = LocationStore.shared
         var diskPaths = Set<String>()
@@ -295,7 +406,7 @@ enum IndexService {
         folder: URL,
         existing: inout [PhotoFile]
     ) -> ScanResult {
-        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "jpg", "jpeg"]
+        let rawExtensions: Set<String> = ["raf", "arw", "cr3", "cr2", "jpg", "jpeg"]
         let fm = FileManager.default
         let locStore = LocationStore.shared
         var diskPaths = Set<String>()

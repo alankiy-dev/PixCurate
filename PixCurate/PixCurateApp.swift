@@ -1,8 +1,24 @@
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
+
+/// アプリ選択パネルを出し、選ばれたアプリURLをクロージャに渡す（ワークフローアプリ設定用）
+@MainActor
+func chooseWorkflowApp(_ completion: @escaping (URL) -> Void) {
+    let panel = NSOpenPanel()
+    panel.title = "アプリケーションを選択"
+    panel.allowedContentTypes = [.application]
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = URL(fileURLWithPath: "/Applications")
+    if panel.runModal() == .OK, let url = panel.url {
+        completion(url)
+    }
+}
 
 extension Notification.Name {
-    static let rescanRequested    = Notification.Name("pixcurate.rescan")
-    static let rebuildRequested   = Notification.Name("pixcurate.rebuild")
+    static let rescanRequested     = Notification.Name("pixcurate.rescan")
+    static let fullRescanRequested = Notification.Name("pixcurate.fullRescan")
+    static let rebuildRequested    = Notification.Name("pixcurate.rebuild")
     static let resetWindowState   = Notification.Name("pixcurate.resetWindowState")
     static let showHelp           = Notification.Name("pixcurate.showHelp")
     /// 拡大表示ウィンドウで評価を変更したとき。userInfo: ["url": URL, "rating": Int?]
@@ -63,6 +79,33 @@ struct PixCurateCommands2: Commands {
             }
             .keyboardShortcut("r", modifiers: .command)
 
+            Button("完全再スキャン") {
+                NotificationCenter.default.post(name: .fullRescanRequested, object: nil)
+            }
+            .keyboardShortcut("r", modifiers: [.command, .shift])
+
+            Divider()
+
+            Menu("ワークフローアプリ") {
+                Text("編集: \(WorkflowStore.shared.displayName(WorkflowStore.shared.editAppURL) ?? "未設定")")
+                Button("編集アプリを選択…") {
+                    chooseWorkflowApp { WorkflowStore.shared.setEditApp($0) }
+                }
+                if WorkflowStore.shared.editAppURL != nil {
+                    Button("編集アプリを解除") { WorkflowStore.shared.clearEditApp() }
+                }
+
+                Divider()
+
+                Text("プリント: \(WorkflowStore.shared.displayName(WorkflowStore.shared.printAppURL) ?? "未設定")")
+                Button("プリントアプリを選択…") {
+                    chooseWorkflowApp { WorkflowStore.shared.setPrintApp($0) }
+                }
+                if WorkflowStore.shared.printAppURL != nil {
+                    Button("プリントアプリを解除") { WorkflowStore.shared.clearPrintApp() }
+                }
+            }
+
             Divider()
 
             Button("DB再構築…") {
@@ -96,6 +139,7 @@ struct PixCurateApp: App {
                 .environment(FilterPresetStore.shared)
                 .environment(CollectionStore.shared)
                 .environment(SourceFolderStore.shared)
+                .environment(WorkflowStore.shared)
                 .sheet(isPresented: $showAbout) { AboutView() }
                 .sheet(isPresented: $showHelp) {
                     HelpView()
